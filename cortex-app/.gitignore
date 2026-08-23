@@ -1,0 +1,27 @@
+# secrets
+.env
+
+# venv / build
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# runtime state（锚定到 cortex-app 根，避免误伤同名源码包如 cortex/services/memory/）
+/data/
+/memory/
+/tool-output/
+/traces/
+
+# user content（样例语料随仓库分发，其余用户内容不入库）
+knowledge_base/*
+!knowledge_base/.gitkeep
+!knowledge_base/samples/
+
+# tooling caches
+.pytest_cache/
+.ruff_cache/
+.DS_Store

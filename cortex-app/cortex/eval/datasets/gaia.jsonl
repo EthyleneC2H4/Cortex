@@ -1,0 +1,14 @@
+{"id": "g01", "level": "L1", "question": "中文嵌入模型 bge-small-zh-v1.5 的输出向量维度是多少？", "answer": "512"}
+{"id": "g02", "level": "L1", "question": "检索融合策略 RRF 的英文全称（三个单词，小写）是什么？", "answer": "reciprocal rank fusion"}
+{"id": "g03", "level": "L1", "question": "图数据库 Neo4j 使用的声明式查询语言叫什么名字（小写）？", "answer": "cypher"}
+{"id": "g04", "level": "L1", "question": "向量数据库 Qdrant 默认的 REST API 端口号是多少？", "answer": "6333"}
+{"id": "g05", "level": "L1", "question": "BM25 属于词法检索还是语义检索？（两个字）", "answer": "词法"}
+{"id": "g06", "level": "L2", "question": "记忆加权评分中相关性、重要性、时近性的权重分别为 0.6、0.25、0.15。某条记忆三项归一化得分依次为 1.0、0.8、0.6，加权总分是多少？", "answer": "0.89"}
+{"id": "g07", "level": "L2", "question": "文本切块采用块大小 512、重叠 64 个 token，相邻两块的起始位置相差多少个 token？", "answer": "448"}
+{"id": "g08", "level": "L2", "question": "RRF 取 k=60 时，某文档在一路检索中排名第 1、另一路排名第 3，其融合得分保留三位小数是多少？", "answer": "0.032"}
+{"id": "g09", "level": "L2", "question": "记忆时近性分数定义为 exp(-λ·age)。取 λ=0.05、该记忆已存在 20 天，分数保留两位小数是多少？", "answer": "0.37"}
+{"id": "g10", "level": "L2", "question": "一篇 2000 token 的文档按块大小 512、重叠 64 切块，起始位置依次为 0、448、896……覆盖到文档末尾最少需要多少块？", "answer": "5"}
+{"id": "g11", "level": "L3", "question": "GSSC 上下文工程管线四个阶段为 Get、Select、Structure、Compress，对应中文依次是获取、选择、结构化与什么？（两个字）", "answer": "压缩"}
+{"id": "g12", "level": "L3", "question": "工作、情景、语义、程序性四类记忆中，可通过配置项 procedural_memory_enabled 整体关闭的是哪一类？（四个字）", "answer": "程序性记忆"}
+{"id": "g13", "level": "L3", "question": "记忆综合评分由相关性、重要性与时近性加权而成，用于容量超限时淘汰最低分条目；其中随时间指数衰减的是哪一项？（三个字）", "answer": "时近性"}
+{"id": "g14", "level": "L3", "question": "衡量两名评标者对同一批样本打标一致程度的系数以希腊字母 κ 命名，其中文音译名（两个字）是什么？", "answer": "卡帕"}
