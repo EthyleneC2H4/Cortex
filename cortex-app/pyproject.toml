@@ -22,10 +22,6 @@ classifiers = [
   "Topic :: Text Processing :: Indexing",
 ]
 
-[project.urls]
-Homepage = "https://github.com/EthyleneC2H4/Cortex"
-Documentation = "https://github.com/EthyleneC2H4/Cortex/tree/main/docs"
-Issues = "https://github.com/EthyleneC2H4/Cortex/issues"
 dependencies = [
   "hello-agents==1.0.0",
   "python-dotenv>=1.0",
@@ -42,6 +38,11 @@ dependencies = [
   "sse-starlette>=1.8",
   "uvicorn>=0.29",
 ]
+
+[project.urls]
+Homepage = "https://github.com/EthyleneC2H4/Cortex"
+Documentation = "https://github.com/EthyleneC2H4/Cortex/tree/main/docs"
+Issues = "https://github.com/EthyleneC2H4/Cortex/issues"
 
 [project.optional-dependencies]
 rerank = ["FlagEmbedding>=1.2"]
