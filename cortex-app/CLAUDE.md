@@ -18,8 +18,27 @@ python -m cortex.prewarm         # 一次性：解析模型 id / tiktoken 缓存
 python -m cortex.app --chat      # CLI 多轮对话
 python -m cortex.app --ingest PATH [--research TOPIC --mode pipeline|explore]
 python -m cortex.eval.run --suite all [--no-rerank|--no-memory|--single-agent]   # → data/eval/<ts>/report.md
-python -m cortex.api.server      # FastAPI+SSE :8000（POST /research /ingest /ingest-text、GET /session/{id}）
+python -m cortex.api.server      # FastAPI+SSE :8000；frontend/dist 存在时同端口托管 Web UI
 ```
+
+主要端点：`POST /research`（结构化阶段进度 SSE + 报告落盘 data/reports/）、`POST /chat/stream`、`POST /ingest`、`POST /ingest-text`、`GET|DELETE /documents[/{doc_id}]`、`GET|POST /session`、`GET /health`。运行中再提交 /research → 409。
+
+## Web 前端（frontend/）
+
+React 19 + Vite + Tailwind v4 四页 SPA（研究工作台/智能对话/知识库/系统状态）。命令在 `frontend/` 下：
+
+```bash
+cd frontend && export npm_config_cache=/tmp/npm-cache-cortex   # 本机 ~/.npm 有 root 属主文件时的绕行
+npm run dev        # :5173 热更新，API 路径代理到 :8000（零 CORS）
+npx tsc -b         # 类型检查（project references，勿用 --noEmit）
+npx vitest run     # SSE 解析器边界/组件键盘契约/rehype 引用 chip 等
+npm run build      # 生产构建 → dist/（server 检测到即托管，SPA 子路由有兜底）
+```
+
+- **SSE 消费**：EventSource 不能 POST → 自写 fetch+ReadableStream 解析器（`src/api/sse.ts` 纯函数）。**不自动重连**（防孤儿 run）；断连提示结果已落盘。
+- **多轮上下文**：`/chat/stream` 每轮必须把问答写回 `orchestrator.history_manager.append(Message(...))`——漏掉则下一轮看不见本轮（live 门禁抓到过的缺陷）。
+- **主题**：令牌唯一入口 `src/theme.css`（Tailwind v4 @theme + `.dark` 类切换，index.html 内联脚本防 FOUC）。terracotta 对比度仅 ≈3.2:1，正文级强调一律 accent-strong。
+- **引用 chip**：报告/回复中的 `[doc_id/chunk_id]` 由自写 rehype 插件渲染为点击复制按钮。
 
 `.env` 存真实 key（已 gitignore）；`.env.example` 只有占位符。`CORTEX_STORE_MODE=docker` 才需要 `docker compose up -d`（Qdrant+Neo4j）；默认零 docker。
 
@@ -35,6 +54,7 @@ python -m cortex.api.server      # FastAPI+SSE :8000（POST /research /ingest /i
 - 子代理**必须持有共享 ToolRegistry**——过滤靠 run_as_subagent 派发期临时摘除条目实现，没注册表就无工具可用（builders.py 给全部五个代理传 registry）
 - **所有流水线阶段都走 run_as_subagent + 角色 filter**，包括 writer/critic 文本阶段——直接 `.run()` 会看到含 TaskTool 的完整注册表，模型可能自行派发嵌套子代理失控（实测发生过）
 - **阶段看门狗**：每阶段套墙钟上限（`CORTEX_STAGE_TIMEOUT`，默认 900s；0=不限时）——免费档经本地代理偶发 HTTP 读挂死且框架流式读不触发超时。超时放弃守护线程、产出占位文本并继续；被放弃阶段没走 finally 还原会留下"被过滤"的注册表，由 `registry_repair` 回调用装配完成时的工具快照写回兜底
+- **进度观测**：`build_pipeline(progress_cb=…)` / `ExplorationMode(progress_cb=…)` 在阶段边界发射结构化 dict（run_start/stage_start/stage_end/note/run_end），`_safe_emit` 吞异常保证进度故障不拖垮流水线；CLI/eval 不传回调零影响。服务器经 worker 线程 + `queue.Queue` + `asyncio.to_thread` 桥接为 SSE
 - `dispatch_subagent` 用 `return_summary=False` 取原始输出：框架 summary 会包“任务:…\n结果:…”外壳破坏 Findings JSON 解析
 - `parse_findings` 宽容解析：平衡括号扫描 → 截断 JSON 字段级抢救（免费档生成上限截断常见）
 

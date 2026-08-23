@@ -31,3 +31,30 @@ jobs:
 
       - name: Offline test gate (unit + integration)
         run: pytest -m "unit or integration" -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cortex-app/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: cortex-app/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc project references)
+        run: npx tsc -b
+
+      - name: Unit tests (vitest)
+        run: npx vitest run
+
+      - name: Production build
+        run: npm run build

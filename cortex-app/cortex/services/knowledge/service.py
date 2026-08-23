@@ -59,6 +59,13 @@ class KnowledgeService:
     def delete(self, doc_id: str) -> bool:
         return delete_document(self.deps, doc_id)
 
+    def list_documents(self) -> List[dict]:
+        """知识库文档清单（新→旧），供 API 列表页使用；不写裸 SQL 到调用方。"""
+        return self.db.query(
+            "SELECT id AS doc_id, title, source, n_chunks, created_at "
+            "FROM documents ORDER BY created_at DESC"
+        )
+
     def search(self, query: str, *, top_k: int = 5, weak_llm=None, mode: str = "auto") -> RetrievalResult:
         return retrieve(
             self.deps, query, weak_llm=weak_llm, top_k=top_k, mode=mode,

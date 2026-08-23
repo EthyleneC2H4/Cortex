@@ -75,7 +75,10 @@ def parse_findings(text: str, *, max_tokens: int = 2000) -> Findings:
             k in data for k in ("conclusions", "supporting", "citations", "conflicts", "confidence")
         ):
             data["raw"] = ""
-            return _clamp(Findings(**_coerce(data)), max_tokens)
+            try:
+                return _clamp(Findings(**_coerce(data)), max_tokens)
+            except Exception:  # noqa: BLE001 —— 兜底契约：任何未预料形态走抢救/降级，不抛异常
+                pass
     # 截断抢救：JSON 被生成上限截断时，逐字段正则捞回可用部分
     salvaged = _salvage_truncated(candidate)
     if salvaged is not None:
@@ -131,22 +134,57 @@ def _salvage_truncated(text: str) -> Findings | None:
     )
 
 
+def _item_to_str(item: object) -> str:
+    """列表条目展平为字符串：dict 条目优先取描述性键，否则 k:v 拼接。
+
+    实测免费档模型会输出结构化矛盾条目
+    （如 {'type': 'tooling_failure', 'detail': …}），schema 只收 str。
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for k in ("description", "detail", "message", "summary", "content", "text"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return f"[{item.get('type')}] {v.strip()}" if item.get("type") else v.strip()
+        parts = [
+            f"{k}: {v}"
+            for k, v in item.items()
+            if isinstance(v, (str, int, float)) and str(v).strip()
+        ]
+        return "; ".join(parts)
+    if item is None:
+        return ""
+    return str(item).strip()
+
+
 def _coerce(data: dict) -> dict:
-    """字段类型矫正：字符串→列表、数字置信度 clamp、引用 dict 列表容错。"""
+    """字段类型矫正：字符串→列表、列表内 dict→str、数字置信度 clamp、引用容错。"""
     out = dict(data)
     for k in ("conclusions", "supporting", "conflicts"):
         v = out.get(k)
         if isinstance(v, str):
             out[k] = [v]
-        elif v is None:
+        elif isinstance(v, list):
+            out[k] = [s for s in (_item_to_str(it) for it in v) if s]
+        else:
             out[k] = []
-    cites = out.get("citations") or []
+    cites = out.get("citations")
+    if not isinstance(cites, list):  # 非 list（str/dict/bool）一律视为无引用
+        cites = []
     fixed = []
     for c in cites:
         if isinstance(c, str):
             fixed.append(Citation(chunk_id=c).model_dump())
         elif isinstance(c, dict):
-            fixed.append(c)
+            # 弱模型常见形态：doc_id 为 null、location 为数字——逐字段归一，坏条目丢弃
+            try:
+                fixed.append(Citation(
+                    **{k: ("" if c.get(k) is None else str(c.get(k)))
+                       for k in ("doc_id", "chunk_id", "location")}
+                ).model_dump())
+            except Exception:  # noqa: BLE001
+                continue
     out["citations"] = fixed
     try:
         conf = float(out.get("confidence", 0.5))

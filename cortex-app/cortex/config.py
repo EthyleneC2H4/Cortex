@@ -108,6 +108,7 @@ class CortexConfig:
 
     # ---- HTTP API ----
     api_key: str = ""  # X-API-Key；空 = 不鉴权
+    cors_origins: str = ""  # 逗号分隔的允许来源；空 = 不启用 CORS（开发走 vite 代理）
 
     def __post_init__(self) -> None:
         self.project_root = Path(self.project_root).expanduser().resolve()
@@ -239,6 +240,7 @@ def load_config(env_file: str | Path | None = None) -> CortexConfig:
         mcp_servers_json=_env("CORTEX_MCP_SERVERS"),
         a2a_researcher_url=_env("CORTEX_A2A_RESEARCHER_URL"),
         api_key=_env("API_KEY"),
+        cors_origins=_env("CORTEX_CORS_ORIGINS"),
     )
     cfg.ensure_dirs()
     return cfg

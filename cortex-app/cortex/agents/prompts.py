@@ -7,7 +7,7 @@ FINDINGS_SCHEMA = """{
   "supporting": ["支撑要点1", ...],
   "citations": [{"doc_id": "...", "chunk_id": "...", "location": "章节"}],
   "confidence": 0.0-1.0,
-  "conflicts": ["资料间的矛盾点，没有则空数组"]
+  "conflicts": ["矛盾点的纯字符串描述（不要输出对象），没有则空数组"]
 }"""
 
 ORCHESTRATOR = (

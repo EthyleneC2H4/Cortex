@@ -1,0 +1,124 @@
+@import "tailwindcss";
+@import "@fontsource-variable/lora";
+
+/* 暗色走 class 策略（index.html 内联脚本预取，防 FOUC） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Claude 式主题令牌（唯一样式入口）。
+ * 对比度规则：terracotta 在 cream 底上仅 ≈3.2:1 —— accent 只用于
+ * 大标题/边框/填充/大按钮；正文级强调一律用 accent-strong（≥4.5:1）。
+ */
+@theme {
+  --color-page: #faf9f5;
+  --color-surface: #ffffff;
+  --color-muted: #f0eee6;
+  --color-line: #e3e0d5;
+  --color-ink: #3d3929;
+  --color-ink-2: #75735f;
+  --color-accent: #d97757;
+  --color-accent-strong: #a84e31;
+  --color-danger: #bf4d43;
+  --color-success: #6e8b5e;
+  --color-warning: #b08a3e;
+
+  --font-display:
+    "Lora Variable", "Songti SC", "SimSun", Georgia, serif;
+  --font-body:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Segoe UI", system-ui, sans-serif;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  --shadow-card: 0 1px 2px rgb(61 57 41 / 0.04), 0 4px 12px rgb(61 57 41 / 0.05);
+}
+
+/* 暗色：同名令牌整体换值，工具类自动跟随 */
+.dark {
+  --color-page: #262624;
+  --color-surface: #30302e;
+  --color-muted: #1f1e1d;
+  --color-line: #3e3e38;
+  --color-ink: #f5f4ef;
+  --color-ink-2: #b8b6a9;
+  --color-accent: #e08a67;
+  --color-accent-strong: #e08a67;
+  --color-danger: #e07a70;
+  --color-success: #8fae7e;
+  --color-warning: #cfa759;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.25), 0 4px 12px rgb(0 0 0 / 0.2);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-body);
+  }
+  body {
+    background-color: var(--color-page);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 键盘可达性：统一 focus 环形描边 */
+  :focus-visible {
+    outline: 2px solid var(--color-accent-strong);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--color-accent) 30%, transparent);
+  }
+}
+
+/* 尊重系统减弱动效偏好：全局动效归零 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/*
+ * 显式定义 shadow-card 工具类消费 --shadow-card 变量。
+ * v4 内置阴影工具类会把 @theme 值内联为字面量（不引用变量），导致
+ * .dark 的同名覆盖永远不生效——这里覆写为变量引用，暗色切换才真正跟随。
+ */
+@utility shadow-card {
+  --tw-shadow: var(--shadow-card);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow),
+    var(--tw-ring-shadow), var(--tw-shadow);
+}
+
+/* 引用 chip：由 rehype 插件注入（非 JSX），样式集中在此 */
+@layer components {
+  .citation-chip {
+    display: inline-flex;
+    align-items: center;
+    margin: 0 2px;
+    padding: 0 6px;
+    border-radius: 5px;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+    color: var(--color-accent-strong);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    line-height: 18px;
+    vertical-align: baseline;
+    cursor: copy;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background-color 150ms ease;
+  }
+  .citation-chip:hover {
+    background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  }
+}

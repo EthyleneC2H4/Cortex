@@ -32,6 +32,35 @@ class TestParseFindings:
         f = parse_findings(raw)
         assert f.citations[0].chunk_id == "d:3"
 
+    def test_structured_conflict_items_flattened(self):
+        # 免费档实测：模型把 conflicts 输出为结构化对象列表（live 门禁抓到的缺陷）
+        raw = json.dumps({
+            "conclusions": ["A"],
+            "conflicts": [
+                {"type": "tooling_failure", "detail": "工具 X 在 0.85+ 下行为变化，置信度下调至 0.75"},
+                {"type": "minor_wording", "description": "两份资料措辞不一致，已采用限定措辞"},
+                {"note": 3, "impact": "影响很小"},
+                "纯字符串矛盾保留原样",
+            ],
+        })
+        f = parse_findings(raw)
+        assert len(f.conflicts) == 4 and all(isinstance(c, str) for c in f.conflicts)
+        assert "0.75" in f.conflicts[0]  # detail 键被取出
+        assert "限定措辞" in f.conflicts[1]  # description 键被取出
+        assert f.conflicts[2] == "note: 3; impact: 影响很小"  # 无描述键 → k:v 拼接
+        assert f.conflicts[3] == "纯字符串矛盾保留原样"
+
+    def test_malformed_citations_never_raise(self):
+        # 审查工作流抓到：dict 引用里 doc_id=null / location=数字 曾击穿 pydantic 校验炸全场
+        raw = '{"conclusions": ["a"], "citations": [{"doc_id": null, "location": 3}, ' \
+              '"d:1", {"doc_id": "x", "chunk_id": "y"}, 42]}'
+        f = parse_findings(raw)  # 不应抛异常
+        assert [c.chunk_id for c in f.citations] == ["", "d:1", "y"]
+        assert f.citations[0].location == "3" and f.citations[0].doc_id == ""
+        # citations 整体非 list 也安全
+        f2 = parse_findings('{"conclusions": ["a"], "citations": "d:9"}')
+        assert f2.citations == []
+
     def test_garbage_falls_back_to_raw(self):
         f = parse_findings("完全不是 JSON 的一段结论文字。")
         assert f.raw.startswith("完全不是")

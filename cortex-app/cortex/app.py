@@ -143,6 +143,11 @@ class CortexApp:
     # ---------------------------------------------------------------- #
     @property
     def pipeline(self):
+        return self.build_pipeline()
+
+    def build_pipeline(self, progress_cb=None):
+        """构建 ResearchPipeline；API 层经 ``progress_cb=`` 注入进度回调，
+        CLI/eval 走 :attr:`pipeline` 不变。"""
         from .agents.dispatch import ResearchPipeline
 
         # 装配完成时的全量工具快照：看门狗放弃的阶段没走 run_as_subagent
@@ -160,6 +165,7 @@ class CortexApp:
             context_engine=self.services.get("context"),
             traces_dir=self.cfg.data_dir / "traces",
             registry_repair=_repair_registry,
+            progress_cb=progress_cb,
         )
 
     def research(self, topic: str, mode: str = "pipeline"):

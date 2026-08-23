@@ -22,6 +22,18 @@ from ..tools.filters import filter_for_role
 
 _NO_REVISION_MARK = "无需改进"
 
+_PIPELINE_STAGES = ["gather", "research", "write", "critique", "revise"]
+
+
+def _safe_emit(progress_cb: Optional[Callable[[dict], None]], payload: dict) -> None:
+    """进度回调尽力而为：进度故障绝不拖垮流水线主流程。"""
+    if progress_cb is None:
+        return
+    try:
+        progress_cb(payload)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 @dataclass
 class PipelineTrace:
@@ -57,16 +69,43 @@ class ResearchPipeline:
     def __init__(self, agent_set, *, knowledge=None, memory=None, context_engine=None,
                  traces_dir: Optional[Path] = None,
                  registry_repair: Optional[Callable[[], None]] = None,
-                 stage_timeout: float = 0.0) -> None:
+                 stage_timeout: float = 0.0,
+                 progress_cb: Optional[Callable[[dict], None]] = None) -> None:
         self.agents = agent_set
         self.knowledge = knowledge
         self.memory = memory
         self.context_engine = context_engine
         self.traces_dir = Path(traces_dir) if traces_dir else None
         self.registry_repair = registry_repair
+        # 结构化进度回调（dict 载荷，i18n 留给消费方；如 API 层转发为 SSE）
+        self.progress_cb = progress_cb
         # 0 = 不限时；默认取 CORTEX_STAGE_TIMEOUT（秒）
         self.stage_timeout = stage_timeout or float(os.getenv("CORTEX_STAGE_TIMEOUT", "900"))
         self._repair_pending = False
+
+    def _stage_marker(self, name: str, t0: float):
+        """进入阶段时发 stage_start，返回 finish(**extra) 用于发 stage_end。
+
+        用法：``finish = self._stage_marker("gather", t0)`` … 阶段末
+        ``finish(timed_out=g_timeout, ok=...)``。异常路径不发 stage_end，
+        由上层错误事件兜底。
+        """
+        start = time.time()
+
+        def finish(**extra) -> None:
+            now = time.time()
+            _safe_emit(self.progress_cb, {
+                "type": "stage_end", "stage": name,
+                "elapsed": round(now - start, 1),
+                "run_elapsed": round(now - t0, 1),
+                **extra,
+            })
+
+        _safe_emit(self.progress_cb, {
+            "type": "stage_start", "stage": name,
+            "run_elapsed": round(start - t0, 1),
+        })
+        return finish
 
     # ---------------------------------------------------------------- #
     def _run_with_timeout(self, fn: Callable[[], object], label: str):
@@ -129,8 +168,11 @@ class ResearchPipeline:
         t0 = time.time()
         trace = PipelineTrace()
         stages: dict = {}
+        _safe_emit(self.progress_cb, {"type": "run_start", "mode": "pipeline",
+                                      "stages": list(_PIPELINE_STAGES)})
 
         # ---- 1. Gather（本地检索） ---------------------------------- #
+        finish_gather = self._stage_marker("gather", t0)
         gather_task = (
             f"研究主题：{topic}\n\n"
             "请从本地知识库与记忆中检索与主题相关的证据，"
@@ -145,8 +187,10 @@ class ResearchPipeline:
         stages["gather"] = findings_g
         trace.add("gather", success=g_raw["success"], timed_out=g_timeout,
                   tools=g_raw["tools_used"], confidence=findings_g.confidence)
+        finish_gather(timed_out=g_timeout, ok=bool(g_raw.get("success")))
 
         # ---- 2. Research（联网补充，失败容忍） ----------------------- #
+        finish_research = self._stage_marker("research", t0)
         research_task = f"研究主题：{topic}\n已知线索：{json.dumps(findings_g.model_dump(exclude={'raw'}), ensure_ascii=False)[:1500]}\n请联网补充外部资料并输出 Findings JSON；无法联网时在 conflicts 中说明。"
         r_raw, r_timeout = self._run_with_timeout(
             lambda: dispatch_subagent(self.agents.researcher, research_task, role="researcher"),
@@ -157,8 +201,10 @@ class ResearchPipeline:
         stages["research"] = findings_r
         trace.add("research", success=r_raw["success"], timed_out=r_timeout,
                   tools=r_raw["tools_used"])
+        finish_research(timed_out=r_timeout, ok=bool(r_raw.get("success")))
 
         # ---- 3. Write（GSSC 组装证据+记忆） --------------------------- #
+        finish_write = self._stage_marker("write", t0)
         evidence, memory_block = self._gssc_blocks(topic)
         write_task = (
             f"研究主题：{topic}\n\n"
@@ -174,20 +220,25 @@ class ResearchPipeline:
         if w_timeout:
             draft = f"# 报告生成失败\n\nwrite 阶段执行超时（>{int(self.stage_timeout)}s）"
         trace.add("write", chars=len(draft), timed_out=w_timeout)
+        finish_write(timed_out=w_timeout)
 
         # ---- 4. Critique --------------------------------------------- #
+        finish_critique = self._stage_marker("critique", t0)
         critique_task = f"审校以下研究报告（主题：{topic}）：\n\n{draft[:6000]}\n\n给出修订清单或回复'{_NO_REVISION_MARK}'。"
         critique, c_timeout = self._run_with_timeout(
             lambda: self._run_agent_text(self.agents.critic, critique_task, role="critic"),
             "critique")
         if c_timeout:
             critique = "（critique 阶段执行超时，跳过修订）"
-        trace.add("critique", needs_revision=_NO_REVISION_MARK not in critique,
+        needs_revision = _NO_REVISION_MARK not in critique
+        trace.add("critique", needs_revision=needs_revision,
                   timed_out=c_timeout)
+        finish_critique(timed_out=c_timeout, needs_revision=needs_revision)
 
         # ---- 5. Revise（≤1 次） -------------------------------------- #
         revised = False
         if not c_timeout and _NO_REVISION_MARK not in critique:
+            finish_revise = self._stage_marker("revise", t0)
             revise_task = (
                 f"根据审校意见修订报告（主题：{topic}）。保持原有引用标记，修正指出的问题。\n\n"
                 f"## 原稿\n{draft[:5000]}\n\n## 审校意见\n{critique[:2000]}"
@@ -198,10 +249,16 @@ class ResearchPipeline:
             if not v_timeout and draft2.strip() and not draft2.startswith("# 报告生成失败"):
                 draft, revised = draft2, True  # 修订成功才采纳（异常兜底文本不覆盖原稿）
             trace.add("revise", adopted=revised, timed_out=v_timeout)
+            finish_revise(timed_out=v_timeout, adopted=revised)
+        else:
+            _safe_emit(self.progress_cb, {"type": "note", "code": "revise_skipped",
+                                          "msg": "审校判定无需修订，跳过 revise"})
 
         self._maybe_repair_registry()
         duration = time.time() - t0
         self._flush_trace(trace, topic)
+        _safe_emit(self.progress_cb, {"type": "run_end", "revised": revised,
+                                      "duration_seconds": round(duration, 1)})
         return ResearchResult(topic=topic, mode="pipeline", report_md=draft,
                               stages={"gather": stages["gather"], "research": stages["research"]},
                               revised=revised, duration_seconds=duration)
@@ -250,21 +307,32 @@ class ResearchPipeline:
 
 
 class ExplorationMode:
-    """orchestrator 自主规划模式（PlanSolve + TaskTool 派发）。"""
+    """orchestrator 自主规划模式（PlanSolve + TaskTool 派发）。
 
-    def __init__(self, orchestrator) -> None:
+    同步 ``orchestrator.run()`` 无步级钩子（框架限制）→ 进度只有 run_start/
+    run_end 两枚事件；逐步进度依赖框架 ``arun_stream``，属未来工作。
+    """
+
+    def __init__(self, orchestrator,
+                 progress_cb: Optional[Callable[[dict], None]] = None) -> None:
         self.orchestrator = orchestrator
+        self.progress_cb = progress_cb
 
     def run(self, topic: str) -> ResearchResult:
         t0 = time.time()
+        _safe_emit(self.progress_cb, {"type": "run_start", "mode": "explore",
+                                      "stages": ["explore"]})
         try:
             text = str(self.orchestrator.run(
                 f"请完成以下研究任务并输出结构化中文 Markdown 报告（带 [doc_id/chunk_id] 引用）：\n{topic}"
             ))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             text = f"# 研究失败\n\n编排器异常：{exc}"
+        duration = time.time() - t0
+        _safe_emit(self.progress_cb, {"type": "run_end", "revised": False,
+                                      "duration_seconds": round(duration, 1)})
         return ResearchResult(topic=topic, mode="explore", report_md=text,
-                              stages={}, revised=False, duration_seconds=time.time() - t0)
+                              stages={}, revised=False, duration_seconds=duration)
 
 
 def run_research(topic: str, *, mode: str = "pipeline", agent_set=None, **pipeline_kw) -> ResearchResult:

@@ -30,7 +30,11 @@ Cortex 构建在 [Hello-Agents](https://github.com/jjyaoao/HelloAgents) 框架�
 
 ```mermaid
 flowchart LR
-    U["用户<br/>CLI / API"] --> ORCH
+    U["用户"] --> WEB
+    U2["CLI / API"] --> SRV
+    WEB["Web UI<br/>React + Vite + Tailwind SPA<br/>研究工作台 · 对话 · 知识库 · 状态"]
+    WEB -->|"fetch + SSE"| SRV["FastAPI + SSE :8000"]
+    SRV --> ORCH
 
     subgraph AGENTS["多智能体层（hello-agents 原生范式）"]
         ORCH["Orchestrator<br/>PlanSolveAgent · strong"]
@@ -91,7 +95,8 @@ flowchart LR
 | 🔐 **工具权限** | 共享 ToolRegistry + 派发期角色过滤（filters.py 单一事实来源）；子代理只看到其角色允许的工具 |
 | 📑 **引用核验** | 引用 ID 归一化（五种拼写形态）→ `citation_verify` 蕴含判定 → 无法核验时报告显式披露 |
 | 📊 **评测** | BFCL 式工具调用（AST 等价匹配）· GAIA 式任务达成（分级 QEM）· LLM-as-Judge（win-rate + κ 校准）；30 条冻结集 + 按条目断点续跑 + 消融开关 |
-| 🌐 **服务化** | FastAPI + SSE：`POST /research`（流式研报）、`POST /ingest`、会话管理；X-API-Key 鉴权 |
+| 🌐 **服务化** | FastAPI + SSE：`POST /research`（结构化阶段进度流式 + 报告落盘）、`POST /chat/stream`、文档管理端点；X-API-Key 鉴权；可直接托管前端生产构建 |
+| 🖥️ **Web UI** | React 19 + Vite + Tailwind v4 四页单页应用：研究工作台（五阶段实时计时/看门狗降级可见/报告下载）、智能对话（打字机渲染 + 会话恢复）、知识库管理（拖拽摄取 + 删除确认）、系统状态；暖色双主题、引用 chip 点击复制、完整键盘与无障碍支持 |
 | 🔌 **协议** | MCP-first 联网（技能桥 + 工具桥）；A2A 委派端点；不可用时软降级为仅知识库 + 拒答带 |
 
 ## 快速开始
@@ -133,7 +138,23 @@ python -m cortex.api.server &     # FastAPI + SSE @ :8000
 curl -N -X POST localhost:8000/research \
   -H 'Content-Type: application/json' \
   -d '{"topic": "对比检索增强生成中的混合检索策略", "mode": "pipeline"}'
+
+# 其余端点：POST /chat/stream（对话 SSE）、POST /ingest、POST /ingest-text、
+# GET|DELETE /documents[/{doc_id}]、GET /session/{id}、GET /health
 ```
+
+### Web UI
+
+```bash
+cd cortex-app/frontend
+npm ci && npm run build           # 产出 frontend/dist（首次需 Node ≥ 20）
+cd ..
+python -m cortex.api.server       # 打开 http://127.0.0.1:8000 即是完整应用
+```
+
+- 生产态单命令：FastAPI 托管 `frontend/dist` 静态资源并兜底 SPA 子路由，无 Node 参与运行。
+- 开发态热更新：`npm run dev`（Vite :5173 自动代理 API 到 :8000）。
+- 四页：**研究工作台**（五阶段实时计时 + 看门狗降级标记 + 报告复制/下载，断连后结果已落盘）、**智能对话**（Enter 发送/Shift+Enter 换行、新对话重置）、**知识库**（拖拽上传/文本摄取/删除二次确认）、**系统状态**（服务健康轮询 + 知识库统计）。
 
 ## 评测结果
 
@@ -156,12 +177,17 @@ curl -N -X POST localhost:8000/research \
 ```bash
 pytest -m unit                    # 全 mock 离线单测
 pytest -m integration             # 本地真存储（sqlite + qdrant-local）
-pytest -m "unit or integration"   # 离线门禁：318 passed
+pytest -m "unit or integration"   # 后端离线门禁：333 passed
 pytest -m e2e                     # live 测试，仅 HAS_LLM_KEY=1 时执行
+
+# 前端门禁（cortex-app/frontend）
+npx tsc -b && npx vitest run      # 类型检查 + 39 个组件/解析器测试
+npm run build                     # 生产构建验证
 ```
 
 - 三层测试分层（unit / integration / e2e），离线套件零网络零 Docker，嵌入用确定性 HashEmbedder、存储用 `tmp_path`。
-- CI 在每次 push / PR 上跑离线门禁（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。
+- 前端 SSE 解析器为纯函数测试：中文多字节跨 chunk、CRLF、心跳注释、EOF 无尾换行等边界逐一覆盖。
+- CI 在每次 push / PR 上跑双 job（Python 离线门禁 + Node 前端门禁，见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。
 - 代码通过 ruff 默认规则集检查。
 
 ## 项目结构
@@ -185,6 +211,8 @@ Cortex/
     │   ├── api/                      # FastAPI + SSE 服务
     │   └── llm/                      # 双档 LLM 工厂、模型解析、重试
     ├── skills/                       # 联网技能（web-search / web-reader，MIT）
+    ├── frontend/                     # Web UI：React 19 + Vite + Tailwind v4 SPA
+    │   └── src/{api,hooks,components,pages,lib,context}/
     ├── knowledge_base/samples/       # 样例语料
     ├── tests/                        # unit / integration / e2e 三层
     └── docker-compose.yml            # 可选：Qdrant + Neo4j
@@ -204,7 +232,10 @@ Cortex/
 | 现状 | 改进方向 |
 |---|---|
 | 弱模型 Judge 与人工金标一致性低（κ=0.25） | 引入强模型裁判或与规则指标加权混合；位置交换双评降方差 |
-| 流水线模式 SSE 仅推送终态事件 | 注入阶段级进度回调，推送中间进度事件 |
+| 删除文档清除向量/BM25/元数据，但知识图谱历史关联暂不随删（上游缺口，UI 已提示） | 图谱按 doc_id 级联清理 |
+| 对话会话保存在服务进程内存：重启即失、多标签共享同一上下文（UI 明示） | 会话外置存储（Redis 等）；「新对话」可手动重置 |
+| 聊天为整轮返回（框架 `run()` 同步无 token 流），前端以打字机弥补感知延迟 | 接入框架 `arun_stream` 做 token 级流式 |
+| 同一时刻仅允许一个研究任务（免费档限流保护，重复提交返回 409） | job store 排队 + 断线重连恢复 |
 | 图谱抽取在弱模型下解析成功率有限（已软降级，不阻断摄取） | 改用 function-calling 式结构化抽取 |
 | 评测集为 30 条冻结集（回归检测定位） | 随使用逐步扩充人工金标 |
 | 免费档 LLM 下全流程延迟分钟级 | 付费档即消除；降级设施作为通用韧性层保留 |
