@@ -1,0 +1,21 @@
+# secrets（全局兜底，cortex-app/ 内另有细则）
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# editors / tooling
+.idea/
+.vscode/
+*.swp
+
+# AI assistant workspace state（不入库）
+.claude/
+
+# Python 全局兜底（cortex-app/ 内有更细的规则）
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
