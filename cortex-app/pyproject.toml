@@ -47,7 +47,7 @@ Issues = "https://github.com/EthyleneC2H4/Cortex/issues"
 [project.optional-dependencies]
 rerank = ["FlagEmbedding>=1.2"]
 docker = ["neo4j>=5.0"]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=1.29,<2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 
 [tool.setuptools.packages.find]

@@ -264,7 +264,12 @@ class MCPClientManager:
             async with self._open_session(srv) as session:
                 result = await session.call_tool(tool_name, dict(arguments or {}))
                 text = _result_text(result)
-                if getattr(result, "isError", False):
+                # SDK 1.x 叫 isError、2.x 改名 is_error——两者都识别，
+                # 防止升级后错误结果被静默当成功透传
+                is_err = getattr(result, "isError", None)
+                if is_err is None:
+                    is_err = getattr(result, "is_error", False)
+                if is_err:
                     raise ConnectionError(f"远端工具报错: {text[:300]}")
                 return text
 
