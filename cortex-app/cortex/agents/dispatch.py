@@ -64,12 +64,17 @@ class ResearchPipeline:
     每阶段套**墙钟看门狗**：免费档经代理偶发 HTTP 读挂死（框架流式读
     无法触发超时），守护线程超时后放弃该阶段并继续；被放弃阶段可能
     未走 run_as_subagent 的 finally 还原，用 ``registry_repair`` 兜底修复。
+
+    超时策略（优先级：各阶段独立超时 > 全局 stage_timeout > 900s 兜底）：
+    - CORTEX_STAGE_TIMEOUT_WRITE=1800 等可单独拉长 write 阶段，避免误杀
+    - write 超时直接跳过 critique/revise，省无效等待（占位稿必需修订 → 死循环）
     """
 
     def __init__(self, agent_set, *, knowledge=None, memory=None, context_engine=None,
                  traces_dir: Optional[Path] = None,
                  registry_repair: Optional[Callable[[], None]] = None,
                  stage_timeout: float = 0.0,
+                 stage_timeouts: Optional[dict[str, float]] = None,
                  progress_cb: Optional[Callable[[dict], None]] = None) -> None:
         self.agents = agent_set
         self.knowledge = knowledge
@@ -77,11 +82,33 @@ class ResearchPipeline:
         self.context_engine = context_engine
         self.traces_dir = Path(traces_dir) if traces_dir else None
         self.registry_repair = registry_repair
-        # 结构化进度回调（dict 载荷，i18n 留给消费方；如 API 层转发为 SSE）
         self.progress_cb = progress_cb
-        # 0 = 不限时；默认取 CORTEX_STAGE_TIMEOUT（秒）
-        self.stage_timeout = stage_timeout or float(os.getenv("CORTEX_STAGE_TIMEOUT", "900"))
+
+        # 各阶段独立超时（秒；0=不限时），优先级高于全局
+        self._stage_timeouts: dict[str, float] = stage_timeouts or {}
+
+        # 全局兜底：沿用 stage_timeout kwarg（向后兼容），再回落到 env CORTEX_STAGE_TIMEOUT
+        if stage_timeout > 0:
+            self._default_timeout = float(stage_timeout)
+        else:
+            self._default_timeout = float(os.getenv("CORTEX_STAGE_TIMEOUT", "900"))
+
+        # 同时也把全局超时记为 "gather" 键，保持旧接口兼容
+        if stage_timeout > 0:
+            self._stage_timeouts["gather"] = float(stage_timeout)
+
+        self.stage_timeout = self._default_timeout
+
         self._repair_pending = False
+        # 记录 write 是否超时，用于跳过下游
+        self._write_timed_out = False
+
+    def _get_timeout(self, stage: str) -> float:
+        """取阶段超时：stage-specific > global > 0。"""
+        specific = self._stage_timeouts.get(stage, 0)
+        if specific:
+            return float(specific)
+        return self._default_timeout
 
     def _stage_marker(self, name: str, t0: float):
         """进入阶段时发 stage_start，返回 finish(**extra) 用于发 stage_end。
@@ -108,9 +135,9 @@ class ResearchPipeline:
         return finish
 
     # ---------------------------------------------------------------- #
-    def _run_with_timeout(self, fn: Callable[[], object], label: str):
-        """(fn, 超时) → (结果, timed_out)；超时放弃守护线程并标记需修注册表。"""
-        timeout = getattr(self, "stage_timeout", 0.0) or 0.0
+    def _run_with_timeout(self, fn: Callable[[], object], stage: str):
+        """(fn, 阶段名) → (结果, timed_out)；用阶段专属超时，超时放弃守护线程。"""
+        timeout = self._get_timeout(stage)
         if timeout <= 0:
             return fn(), False
         out: dict = {}
@@ -121,7 +148,7 @@ class ResearchPipeline:
             except BaseException as exc:  # noqa: BLE001 —— 线程内异常带回主线程
                 out["error"] = exc
 
-        t = threading.Thread(target=_worker, daemon=True, name=f"stage-{label}")
+        t = threading.Thread(target=_worker, daemon=True, name=f"stage-{stage}")
         t.start()
         t.join(timeout)
         if t.is_alive():
@@ -218,12 +245,14 @@ class ResearchPipeline:
         draft, w_timeout = self._run_with_timeout(
             lambda: self._run_agent_text(self.agents.writer, write_task, role="writer"), "write")
         if w_timeout:
+            self._write_timed_out = True
             draft = f"# 报告生成失败\n\nwrite 阶段执行超时（>{int(self.stage_timeout)}s）"
         trace.add("write", chars=len(draft), timed_out=w_timeout)
         finish_write(timed_out=w_timeout)
 
         # ---- 4. Critique --------------------------------------------- #
         finish_critique = self._stage_marker("critique", t0)
+        finish_revise = self._stage_marker("revise", t0)
         critique_task = f"审校以下研究报告（主题：{topic}）：\n\n{draft[:6000]}\n\n给出修订清单或回复'{_NO_REVISION_MARK}'。"
         critique, c_timeout = self._run_with_timeout(
             lambda: self._run_agent_text(self.agents.critic, critique_task, role="critic"),
@@ -236,23 +265,32 @@ class ResearchPipeline:
         finish_critique(timed_out=c_timeout, needs_revision=needs_revision)
 
         # ---- 5. Revise（≤1 次） -------------------------------------- #
-        revised = False
-        if not c_timeout and _NO_REVISION_MARK not in critique:
-            finish_revise = self._stage_marker("revise", t0)
-            revise_task = (
-                f"根据审校意见修订报告（主题：{topic}）。保持原有引用标记，修正指出的问题。\n\n"
-                f"## 原稿\n{draft[:5000]}\n\n## 审校意见\n{critique[:2000]}"
-            )
-            draft2, v_timeout = self._run_with_timeout(
-                lambda: self._run_agent_text(self.agents.writer, revise_task, role="writer"),
-                "revise")
-            if not v_timeout and draft2.strip() and not draft2.startswith("# 报告生成失败"):
-                draft, revised = draft2, True  # 修订成功才采纳（异常兜底文本不覆盖原稿）
-            trace.add("revise", adopted=revised, timed_out=v_timeout)
-            finish_revise(timed_out=v_timeout, adopted=revised)
-        else:
+        # 若 write 阶段已超时（返回占位稿），则跳过 critique/revise
+        # 避免"占位稿 → 必须修订 → 又超时" 的死亡螺旋
+        if self._write_timed_out:
             _safe_emit(self.progress_cb, {"type": "note", "code": "revise_skipped",
-                                          "msg": "审校判定无需修订，跳过 revise"})
+                                          "msg": "write 阶段超时，直接沿用占位稿并跳过审校/修订"})
+            finish_critique(timed_out=True, needs_revision=False)
+            finish_revise(timed_out=True, adopted=False)
+            revised = False
+        else:
+            revised = False
+            if not c_timeout and _NO_REVISION_MARK not in critique:
+                finish_revise = self._stage_marker("revise", t0)
+                revise_task = (
+                    f"根据审校意见修订报告（主题：{topic}）。保持原有引用标记，修正指出的问题。\n\n"
+                    f"## 原稿\n{draft[:5000]}\n\n## 审校意见\n{critique[:2000]}"
+                )
+                draft2, v_timeout = self._run_with_timeout(
+                    lambda: self._run_agent_text(self.agents.writer, revise_task, role="writer"),
+                    "revise")
+                if not v_timeout and draft2.strip() and not draft2.startswith("# 抐告生成失败"):
+                    draft, revised = draft2, True  # 修订成功才采纳（异常兜底文本不覆盖原稿）
+                trace.add("revise", adopted=revised, timed_out=v_timeout)
+                finish_revise(timed_out=v_timeout, adopted=revised)
+            else:
+                _safe_emit(self.progress_cb, {"type": "note", "code": "revise_skipped",
+                                              "msg": "审校判定无需修订，跳过 revise"})
 
         self._maybe_repair_registry()
         duration = time.time() - t0
@@ -337,6 +375,23 @@ class ExplorationMode:
 
 def run_research(topic: str, *, mode: str = "pipeline", agent_set=None, **pipeline_kw) -> ResearchResult:
     """统一入口：mode=pipeline | explore。"""
+    # 默认各阶段超时（秒）——写给更长，免费档常见的读挂死与 write 超时
+    default_stage_timeouts = {
+        "gather": 0,
+        "research": 0,
+        "write": 1800,       # 给 write 足够时间（原默认 900s 易误杀）
+        "critique": 300,     # 审校不宜太久
+        "revise": 600,       # 修订留出余量
+    }
+    # 用户如自行传 stage_timeouts，则合并（用户值优先）
+    if "stage_timeouts" not in pipeline_kw:
+        pipeline_kw["stage_timeouts"] = default_stage_timeouts
+    elif pipeline_kw["stage_timeouts"]:
+        # 浅层 merge：仅补齐缺失的键
+        merged = dict(default_stage_timeouts)
+        merged.update(pipeline_kw["stage_timeouts"])
+        pipeline_kw["stage_timeouts"] = merged
+
     if mode == "explore":
         if agent_set is None:
             raise ValueError("explore 模式需要 agent_set")

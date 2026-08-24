@@ -106,6 +106,16 @@ class CortexConfig:
     mcp_servers_json: str = ""
     a2a_researcher_url: str = ""
 
+    # ---- 流水线阶段超时（秒；0=不限时）----
+    # 总阶段超时（兼容旧 env CORTEX_STAGE_TIMEOUT）
+    stage_timeout: int = 900
+    # 各阶段独立超时（优先级高于 stage_timeout）
+    stage_timeout_gather: int = 0
+    stage_timeout_research: int = 0
+    stage_timeout_write: int = 0
+    stage_timeout_critique: int = 0
+    stage_timeout_revise: int = 0
+
     # ---- HTTP API ----
     api_key: str = ""  # X-API-Key；空 = 不鉴权
     cors_origins: str = ""  # 逗号分隔的允许来源；空 = 不启用 CORS（开发走 vite 代理）
@@ -241,6 +251,13 @@ def load_config(env_file: str | Path | None = None) -> CortexConfig:
         a2a_researcher_url=_env("CORTEX_A2A_RESEARCHER_URL"),
         api_key=_env("API_KEY"),
         cors_origins=_env("CORTEX_CORS_ORIGINS"),
+        # 流水线阶段超时（向后兼容：CORTEX_STAGE_TIMEOUT 作为全局兜底）
+        stage_timeout=_env_int("CORTEX_STAGE_TIMEOUT", 900),
+        stage_timeout_gather=_env_int("CORTEX_STAGE_TIMEOUT_GATHER", 0),
+        stage_timeout_research=_env_int("CORTEX_STAGE_TIMEOUT_RESEARCH", 0),
+        stage_timeout_write=_env_int("CORTEX_STAGE_TIMEOUT_WRITE", 0),
+        stage_timeout_critique=_env_int("CORTEX_STAGE_TIMEOUT_CRITIQUE", 0),
+        stage_timeout_revise=_env_int("CORTEX_STAGE_TIMEOUT_REVISE", 0),
     )
     cfg.ensure_dirs()
     return cfg
