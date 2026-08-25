@@ -53,4 +53,44 @@ describe("Typewriter", () => {
     });
     expect(onDone).toHaveBeenCalledTimes(1);
   });
+
+  it("动画中可键盘操作：Enter/Space 立即补全，且补全后摘除交互语义", () => {
+    stubMatchMedia(false);
+    const onDone = vi.fn();
+    const { container } = render(<Typewriter text="键盘补全" onDone={onDone} />);
+    const span = container.firstElementChild as HTMLElement;
+
+    // 动画中：button 角色 + 可聚焦 + 有 aria 说明
+    expect(span.getAttribute("role")).toBe("button");
+    expect(span.getAttribute("tabindex")).toBe("0");
+    expect(span.getAttribute("aria-label")).toContain("Enter");
+
+    fireEvent.keyDown(span, { key: "Enter" });
+    expect(screen.getByText(/键盘补全/)).toBeTruthy();
+    expect(onDone).toHaveBeenCalledTimes(1);
+
+    // 补全后：交互语义全部摘除，不再占据 tab 序
+    expect(span.getAttribute("role")).toBeNull();
+    expect(span.getAttribute("tabindex")).toBeNull();
+    expect(span.getAttribute("aria-label")).toBeNull();
+  });
+
+  it("Space 同样触发补全且不滚动页面（preventDefault）", () => {
+    stubMatchMedia(false);
+    const { container } = render(<Typewriter text="空格补全" />);
+    const span = container.firstElementChild as HTMLElement;
+    // fireEvent 返回 false ⇔ preventDefault 被调用（页面不会滚动）
+    const notPrevented = fireEvent.keyDown(span, { key: " ", cancelable: true });
+    expect(notPrevented).toBe(false);
+    expect(screen.getByText(/空格补全/)).toBeTruthy();
+  });
+
+  it("其他按键不触发补全", () => {
+    stubMatchMedia(false);
+    const onDone = vi.fn();
+    const { container } = render(<Typewriter text="别的键无效" onDone={onDone} />);
+    fireEvent.keyDown(container.firstElementChild as HTMLElement, { key: "Tab" });
+    fireEvent.keyDown(container.firstElementChild as HTMLElement, { key: "a" });
+    expect(onDone).not.toHaveBeenCalled();
+  });
 });

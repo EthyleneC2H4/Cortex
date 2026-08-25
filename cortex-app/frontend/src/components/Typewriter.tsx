@@ -68,10 +68,29 @@ export function Typewriter({
     }
   };
 
+  // 键盘可达性：动画中是可操作控件（Enter/Space 立即补全），播完即摘除交互语义
+  const interactive = !done;
+
   return (
-    <span onClick={finishNow} className={done ? "" : "cursor-pointer"}>
+    <span
+      onClick={interactive ? finishNow : undefined}
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? "回答生成中，按 Enter 立即显示全文" : undefined}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault(); // 防空格触发页面滚动
+                finishNow();
+              }
+            }
+          : undefined
+      }
+      className={interactive ? "cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-accent" : ""}
+    >
       {shown}
-      {!done && <span className="animate-pulse text-accent">▍</span>}
+      {interactive && <span className="animate-pulse text-accent">▍</span>}
     </span>
   );
 }
