@@ -48,6 +48,19 @@ def prewarm(cfg) -> dict:
     steps["strong_ping"] = ping(strong)
     steps["weak_ping"] = ping(weak)
     print(f"[4/4] ping strong={steps['strong_ping']} weak={steps['weak_ping']}")
+
+    # 5) 可选：BGE 重排器模型下载/加载（仅 enable_rerank 时；失败只降级不报错）
+    if getattr(cfg, "enable_rerank", False):
+        try:
+            from .services.knowledge.rerank import BGEReranker
+
+            rr = BGEReranker(cfg.rerank_model)
+            score = rr._model.compute_score([["预热", "重排器预热查询"]], normalize=True)
+            steps["reranker"] = f"{cfg.rerank_model} ok (score={float(score):.3f})"
+            print(f"[5/5] reranker 就绪: {cfg.rerank_model}")
+        except Exception as exc:
+            steps["reranker"] = f"降级为纯 RRF: {exc}"
+            print(f"[5/5] reranker 初始化失败（检索将用纯 RRF 排序）: {exc}")
     return steps
 
 

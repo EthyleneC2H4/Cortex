@@ -45,7 +45,9 @@ Cortex 在 [Hello-Agents](https://github.com/jjyaoao/HelloAgents) 框架
 - **摄取** —— MarkItDown 解析（md/pdf/docx/pptx…）→ 512/64 token 分块
   （标题栈感知；代码块与表格保持原子）→ 本地 `bge-small-zh-v1.5` 嵌入。
 - **检索** —— 向量 ∪ BM25（CJK bigram）双路召回，RRF（k=60）融合；复杂查询自动升级为
-  多查询扩展（MQE ×3）+ HyDE 并行扇出；三带分类（answer / uncertain / 拒答）。
+  多查询扩展（MQE ×3）+ HyDE 并行扇出；可选交叉编码 BGE 重排融合头部
+  （`CORTEX_ENABLE_RERANK=1` + `pip install -e ".[rerank]"`，不可用时软降级为纯 RRF）；
+  三带分类（answer / uncertain / 拒答）。
 - **记忆** —— working / episodic / semantic / procedural 四类；加权评分
   （0.6 × 相似 + 0.25 × 重要 + 0.15 × 新近）；情景→语义巩固 + 三种软遗忘策略。
 - **上下文工程** —— GSSC（Get–Select–Structure–Compress）：类型化 token 配额、

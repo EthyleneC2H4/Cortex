@@ -8,6 +8,7 @@ top20 后 RRF(k=60) 融合。带判定用**最佳向量余弦**：≥min_score a
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ class RetrievedChunk:
     source: str = ""
     rrf: float = 0.0          # 融合排序分（越大越靠前）
     vector_score: float = -1.0  # 最佳余弦（无向量命中为 -1）
+    rerank_score: float | None = None  # 交叉编码重排分（未启用重排为 None）
 
 
 @dataclass
@@ -186,7 +188,11 @@ def retrieve(
 
     fused = _rrf_fuse(ranked_lists, metas)
     if enable_rerank and reranker is not None and fused:
-        fused = reranker.rerank(q, fused)[:top_k]
+        try:
+            # 重排只调序不改带判定（band 仍由最佳向量余弦决定）；失败软降级回 RRF 序
+            fused = reranker.rerank(q, fused)
+        except Exception:  # noqa: BLE001 —— 重排是增强路径，绝不阻断检索
+            logging.getLogger(__name__).warning("rerank 执行失败，回退 RRF 排序", exc_info=True)
 
     best_vec = max((c.vector_score for c in fused), default=-1.0)
     result = RetrievalResult(band=_band(best_vec, min_score, uncertain_floor),

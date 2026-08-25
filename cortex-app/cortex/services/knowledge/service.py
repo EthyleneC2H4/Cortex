@@ -21,6 +21,10 @@ class KnowledgeService:
     但 qdrant 本地模式同路径必须单 client（排他锁）。
     """
 
+    # 类级默认：兼容测试里 ``__new__`` 跳过 __init__ 的桩构造（属性兜底存在）
+    _reranker = None
+    _reranker_resolved = False
+
     def __init__(self, cfg, *, db: Optional[Database] = None,
                  qdrant_client=None) -> None:
         self.cfg = cfg
@@ -28,8 +32,20 @@ class KnowledgeService:
         self.embedder: EmbeddingProvider = make_embedder(cfg)
         self._qdrant_client = qdrant_client
         self._vector = None
+        self._reranker = None
+        self._reranker_resolved = False  # 惰性构建只尝试一次（失败不反复重试拖慢请求）
         self.bm25 = BM25Index(path=cfg.data_dir / "bm25" / "index.jsonl")
         self.graph = make_graph_store(cfg)
+
+    @property
+    def reranker(self):
+        """惰性重排器：enable_rerank 且依赖/模型可用才有实例，否则 None。"""
+        if not self._reranker_resolved:
+            self._reranker_resolved = True
+            from .rerank import make_reranker
+
+            self._reranker = make_reranker(self.cfg)
+        return self._reranker
 
     # ---------------------------------------------------------------- #
     @property
@@ -72,6 +88,7 @@ class KnowledgeService:
             min_score=self.cfg.retrieval_min_score,
             n_variants=self.cfg.mqe_variants,
             enable_rerank=self.cfg.enable_rerank,
+            reranker=self.reranker,
         )
 
     def ask(self, question: str, strong_llm, *, weak_llm=None, top_k: int = 5) -> QAAnswer:
@@ -81,7 +98,8 @@ class KnowledgeService:
     def search_for_context(self, query: str, *, limit: int = 5, min_score: float | None = None) -> List[dict]:
         """给 ContextEngine 的紧凑证据包：[{text, source, chunk_id, score}]。"""
         floor = self.cfg.retrieval_min_score if min_score is None else min_score
-        result = retrieve(self.deps, query, top_k=limit, min_score=floor)
+        result = retrieve(self.deps, query, top_k=limit, min_score=floor,
+                          enable_rerank=self.cfg.enable_rerank, reranker=self.reranker)
         if result.band == "refuse":
             return []
         return [

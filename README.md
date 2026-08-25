@@ -48,8 +48,9 @@ Four design principles run through the whole system:
 - **Ingestion** — MarkItDown parsing (md/pdf/docx/pptx…) → 512/64-token chunking
   (heading-stack aware; code blocks and tables kept atomic) → local `bge-small-zh-v1.5` embeddings.
 - **Retrieval** — vector ∪ BM25 (CJK bigram) dual recall fused with RRF (k=60); complex queries
-  auto-upgrade to Multi-Query Expansion (MQE ×3) + HyDE parallel fan-out; three-band classification
-  (answer / uncertain / refuse).
+  auto-upgrade to Multi-Query Expansion (MQE ×3) + HyDE parallel fan-out; optional cross-encoder
+  BGE rerank of the fused head (`CORTEX_ENABLE_RERANK=1` + `pip install -e ".[rerank]"`, soft-degrades
+  to pure RRF when unavailable); three-band classification (answer / uncertain / refuse).
 - **Memory** — working / episodic / semantic / procedural; weighted scoring
   (0.6 × similarity + 0.25 × importance + 0.15 × recency); episodic→semantic consolidation plus
   three soft-forgetting strategies.
