@@ -139,6 +139,8 @@ git clone https://github.com/EthyleneC2H4/Cortex.git
 cd Cortex/cortex-app
 
 python3 -m venv .venv && source .venv/bin/activate
+# 先装 CPU 版 torch：跳过 sentence-transformers 连带的多 GB CUDA 轮子
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
 cp .env.example .env              # 填入 LLM_API_KEY（OpenRouter 兼容端点均可）
 python -m cortex.prewarm          # 一次性：解析模型 id / 预热 tiktoken / 下载嵌入模型
@@ -174,7 +176,8 @@ curl -N -X POST localhost:8000/research \
   -d '{"topic": "对比检索增强生成中的混合检索策略", "mode": "pipeline"}'
 
 # 其余端点：POST /chat/stream（对话 SSE）、POST /ingest、POST /ingest-text、
-# GET|DELETE /documents[/{doc_id}]、GET /session/{id}、GET /health
+# GET|DELETE /documents[/{doc_id}]、GET /reports 与 GET /reports/{filename}、
+# GET /session/{id}（过期返回 410）、GET /health
 ```
 
 ### Web UI
@@ -232,7 +235,7 @@ npm run build                     # 生产构建验证
 - 前端 SSE 解析器按纯函数测试：中文多字节跨 chunk、CRLF、心跳注释、EOF 无尾换行等边界逐一覆盖。
 - CI 在每次 push / PR 上跑双 job（Python 离线门禁 + Node 前端门禁，
   见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）。
-- 代码通过 ruff 默认规则集检查。
+- 代码通过 ruff `--select E4,E7,E9,F`（pycodestyle 错误子集 + pyflakes）检查。
 
 ## 项目结构
 

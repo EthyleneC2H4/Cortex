@@ -11,7 +11,7 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 keywords = ["rag", "multi-agent", "knowledge-management", "llm", "hello-agents"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
@@ -30,7 +30,7 @@ dependencies = [
   "tiktoken>=0.7",
   "qdrant-client>=1.9",
   "networkx>=3.0",
-  "markitdown>=0.0.1",
+  "markitdown>=0.1.1,<0.2",  # 0.x 系列 API 不稳定，上界防意外破坏解析链路
   "sentence-transformers>=2.7",
   "rank-bm25>=0.2.2",
   "fastapi>=0.110",
@@ -43,6 +43,10 @@ dependencies = [
 Homepage = "https://github.com/EthyleneC2H4/Cortex"
 Documentation = "https://github.com/EthyleneC2H4/Cortex/tree/main/docs"
 Issues = "https://github.com/EthyleneC2H4/Cortex/issues"
+
+[project.scripts]
+cortex = "cortex.app:main"
+cortex-eval = "cortex.eval.runner:main"
 
 [project.optional-dependencies]
 rerank = ["FlagEmbedding>=1.2"]

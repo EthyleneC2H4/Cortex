@@ -151,6 +151,8 @@ git clone https://github.com/EthyleneC2H4/Cortex.git
 cd Cortex/cortex-app
 
 python3 -m venv .venv && source .venv/bin/activate
+# CPU-only torch first: skips the multi-GB CUDA wheels sentence-transformers would pull
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
 cp .env.example .env              # fill in LLM_API_KEY (any OpenRouter-compatible endpoint)
 python -m cortex.prewarm          # one-time: resolve model ids / warm tiktoken / download embedder
@@ -187,7 +189,8 @@ curl -N -X POST localhost:8000/research \
   -d '{"topic": "Compare hybrid retrieval strategies in RAG", "mode": "pipeline"}'
 
 # Other endpoints: POST /chat/stream (chat SSE), POST /ingest, POST /ingest-text,
-# GET|DELETE /documents[/{doc_id}], GET /session/{id}, GET /health
+# GET|DELETE /documents[/{doc_id}], GET /reports & GET /reports/{filename},
+# GET /session/{id} (410 once expired), GET /health
 ```
 
 ### Web UI
@@ -252,7 +255,7 @@ npm run build                     # production build verification
   heartbeat comments, EOF without trailing newline — edge cases covered one by one.
 - CI runs two jobs on every push / PR (Python offline gate + Node frontend gate, see
   [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-- Code passes ruff's default rule set.
+- Code passes `ruff check --select E4,E7,E9,F` (pycodestyle error subset + pyflakes).
 
 ## Project Layout
 

@@ -21,7 +21,7 @@ python -m cortex.eval.run --suite all [--no-rerank|--no-memory|--single-agent]  
 python -m cortex.api.server      # FastAPI+SSE :8000；frontend/dist 存在时同端口托管 Web UI
 ```
 
-主要端点：`POST /research`（结构化阶段进度 SSE + 报告落盘 data/reports/）、`POST /chat/stream`、`POST /ingest`、`POST /ingest-text`、`GET|DELETE /documents[/{doc_id}]`、`GET|POST /session`、`GET /health`。运行中再提交 /research → 409。
+主要端点：`POST /research`（结构化阶段进度 SSE + 报告落盘 data/reports/）、`POST /chat/stream`、`POST /ingest`（上限 `CORTEX_MAX_UPLOAD_MB`，默认 50，422 详情已脱敏）、`POST /ingest-text`、`GET|DELETE /documents[/{doc_id}]`、`GET /reports` 与 `GET /reports/{filename}`（路径穿越防护）、`GET|POST /session`（会话存储 LRU+TTL：过期/逐出返回 **410**，从未存在才是 404）、`GET /health`。运行中再提交 /research → 409（同步检查后置位，无竞态窗口）。
 
 ## Web 前端（frontend/）
 
