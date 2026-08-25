@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Protocol
 
@@ -66,10 +67,22 @@ class ContextEngine:
         self.memory = memory          # MemoryService | None
         self.knowledge = knowledge    # KnowledgeService | None
         self.weak_llm = weak_llm
-        try:
-            self.counter = TokenCounter(model="gpt-4o-mini")
-            self._count = self.counter.count_text
-        except Exception:
+        # 计数模型从配置推导：优先弱模型 id（OpenAI 系时 tiktoken 有精确词表），
+        # 失败退 gpt-4o-mini 通用 cl100k 词表，再失败退 len//3 近似。
+        # 非 OpenAI 模型 id（OpenRouter 常见）tiktoken 不识别 → 自然落到通用档。
+        self.counter = None
+        candidates = [getattr(cfg, "weak_model_id", "") or "", "gpt-4o-mini"]
+        for model in dict.fromkeys(candidates):  # 去重保序
+            if not model:
+                continue
+            try:
+                self.counter = TokenCounter(model=model)
+                self._count = self.counter.count_text
+                break
+            except Exception:
+                continue
+        else:
+            self.counter = None
             self._count = lambda s: max(1, len(s) // 3)
 
     # ---------------------------------------------------------------- #
@@ -198,9 +211,17 @@ class ContextEngine:
                             budget_tokens=self.budget, used_tokens=used, compressed=did_compress)
 
 
+_UNCLOSED_CITATION_TAIL = re.compile(r"\[[^\]\n]*$")
+
+
 def _truncate(text: str, max_chars_hint: int) -> str:
-    """按 token 预算近似截断（token≈字符数按计数器换算过，这里保守 1:2.5）。"""
+    """按 token 预算近似截断（token≈字符数按计数器换算过，这里保守 1:2.5）。
+
+    截断点落在引用标记中间会产生半个 chip（如 `[d1/ch`），渲染层无法配对——
+    尾部残留未闭合的 `[` 片段整段舍弃（正文里合法的孤立 `[` 极少，代价可接受）。
+    """
     limit = max(80, int(max_chars_hint * 2.5))
     if len(text) <= limit:
         return text
-    return text[:limit].rstrip() + "…"
+    cut = _UNCLOSED_CITATION_TAIL.sub("", text[:limit].rstrip()).rstrip()
+    return cut + "…"

@@ -320,6 +320,13 @@ def create_app(cortex_app=None):
                                       "detail": "orchestrator busy"}})
                 return
             try:
+                # 读己之写：上一轮经异步队列入记忆的问答先落盘，本轮 recall 才可见
+                mem0 = _svc("memory")
+                if mem0 is not None and hasattr(mem0, "flush_writes"):
+                    try:
+                        mem0.flush_writes(timeout=2)
+                    except Exception:  # noqa: BLE001 —— flush 失败不阻断对话
+                        pass
                 if req.reset:
                     hm = getattr(orch, "history_manager", None)
                     if hm is not None and hasattr(hm, "clear"):

@@ -72,3 +72,45 @@ def test_rebase_keeps_explicit_external_path(cfg_factory, tmp_path):
     external = (tmp_path / "explicit-data").resolve()
     cfg.rebase(tmp_path / "other-root")
     assert Path(cfg.data_dir) == external  # 显式外部路径不被迁移
+
+
+# ------------------------------------------------ 启动期配置校验 ---------- #
+def test_memory_weights_must_sum_to_one(cfg_factory):
+    from cortex.config import CortexConfigError
+
+    with pytest.raises(CortexConfigError, match="记忆权重"):
+        cfg_factory(memory_w_similarity=0.5, memory_w_importance=0.25,
+                    memory_w_recency=0.15)  # 和=0.9
+
+
+def test_negative_memory_weight_rejected_even_if_sum_ok(cfg_factory):
+    from cortex.config import CortexConfigError
+
+    with pytest.raises(CortexConfigError, match="记忆权重"):
+        cfg_factory(memory_w_similarity=-0.1, memory_w_importance=1.0,
+                    memory_w_recency=0.1)
+
+
+def test_chunk_overlap_must_be_lt_size(cfg_factory):
+    from cortex.config import CortexConfigError
+
+    with pytest.raises(CortexConfigError, match="chunk_overlap"):
+        cfg_factory(chunk_size=64, chunk_overlap=64)
+    with pytest.raises(CortexConfigError, match="chunk_overlap"):
+        cfg_factory(chunk_size=64, chunk_overlap=-1)
+
+
+def test_negative_timeouts_rejected(cfg_factory):
+    from cortex.config import CortexConfigError
+
+    with pytest.raises(CortexConfigError, match="CORTEX_STAGE_TIMEOUT"):
+        cfg_factory(stage_timeout=-5)
+    with pytest.raises(CortexConfigError, match="WEAK_TIMEOUT"):
+        cfg_factory(weak_timeout=-1)
+
+
+def test_zero_stage_timeout_allowed_but_not_llm_timeouts(cfg_factory):
+    # stage 0 = 不限时（合法）；LLM 超时为 0 也放行（不校验上限，只挡负数）
+    cfg = cfg_factory(stage_timeout=0, stage_timeout_write=0, llm_timeout=0,
+                      strong_timeout=0, weak_timeout=0)
+    assert cfg.stage_timeout == 0

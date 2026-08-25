@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cortex.context.engine import TYPE_QUOTAS, ContextEngine, Packet
+from cortex.context.engine import TYPE_QUOTAS, ContextEngine, Packet, _truncate
 
 pytestmark = pytest.mark.unit
 
@@ -116,3 +116,26 @@ class TestGatherAndBuild:
         assert built.system_prompt.startswith("# Role & Policies")
         assert "对比混合检索策略" in built.system_prompt
         assert built.budget_tokens > 0
+
+
+class TestTruncate:
+    """截断保护：不得把引用标记切成半个 chip（前端按 [doc/chunk] 配对渲染）。"""
+
+    def test_short_text_untouched(self):
+        assert _truncate("短文本", 100) == "短文本"
+
+    def test_no_unclosed_bracket_fragment_left(self):
+        text = "正常内容 " + "[d1/c1] 引用一。" * 20 + " 截断点前残留 [d2/ch"
+        out = _truncate(text, 30)
+        assert out.endswith("…")
+        body = out[:-1]                      # 去掉省略号
+        assert body.count("[") == body.count("]")  # 括号必然配对，无半截标记
+
+    def test_complete_citations_inside_kept_region_survive(self):
+        text = "[d9/x9] 开头引用。" + "填充" * 200 + "[d8/y8] 结尾"
+        out = _truncate(text, 40)
+        assert "[d9/x9]" in out          # 完整标记不受影响
+        assert not out[:-1].endswith(("h", "/c"))  # 无半截标记
+
+    def test_minimum_floor_80_chars(self):
+        assert len(_truncate("x" * 1000, 1)) >= 80

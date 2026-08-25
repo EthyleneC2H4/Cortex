@@ -37,10 +37,15 @@ class _StubKB:
 class _StubMemory:
     def __init__(self) -> None:
         self.remembered: list[dict] = []
+        self.flush_calls: int = 0
 
     def remember(self, *, content, type="episodic", source="", metadata=None, **kw):
         self.remembered.append({"content": content, "type": type,
                                 "source": source, "metadata": metadata})
+
+    def flush_writes(self, timeout: float = 10.0) -> bool:
+        self.flush_calls += 1
+        return True
 
 
 class _StubHistory:
@@ -306,6 +311,36 @@ def test_chat_memory_write_through_called():
     assert "记住我" in mem.remembered[0]["content"]
     assert mem.remembered[0]["type"] == "episodic"
     assert mem.remembered[0]["source"] == "web-chat"
+
+
+def test_chat_flushes_pending_memory_writes_before_recall():
+    """读己之写：本轮回答前必须先 flush 上轮的异步记忆写（recall 才可见）。"""
+    from cortex.api.server import create_app
+
+    stub = _StubApp()
+    order: list[str] = []
+    orch = stub.agents.orchestrator
+    orig_run = orch.run
+
+    def _run(text):
+        order.append("run")
+        return orig_run(text)
+
+    orch.run = _run
+    mem = stub.services["memory"]
+    orig_flush = mem.flush_writes
+
+    def _flush(timeout=10.0):
+        order.append("flush")
+        return orig_flush(timeout)
+
+    mem.flush_writes = _flush
+    with TestClient(create_app(cortex_app=stub)) as c:
+        with c.stream("POST", "/chat/stream",
+                      json={"message": "第二轮", "session_id": "s-flush"}) as resp:
+            "".join(resp.iter_text())
+    # 首个 flush（本轮回答前）先于编排器执行；末尾可能还有 lifespan 关闭时的 flush
+    assert order[:2] == ["flush", "run"]
 
 
 def test_health_reports_services_auth_uptime(client):

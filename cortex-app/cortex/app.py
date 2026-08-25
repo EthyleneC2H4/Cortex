@@ -196,6 +196,13 @@ class CortexApp:
                 continue
             if text.lower() in {"exit", "quit"}:
                 break
+            # 读己之写：把上轮异步写入的记忆先落盘，本轮 recall 才可见
+            mem = self.services.get("memory") if hasattr(self, "services") else None
+            if mem is not None and hasattr(mem, "flush_writes"):
+                try:
+                    mem.flush_writes(timeout=2)
+                except Exception:  # noqa: BLE001 —— flush 失败不阻断对话
+                    pass
             out = self.agents.orchestrator.run(text) if hasattr(self.agents, "orchestrator") \
                 else self.agent.run(text)
             print(f"cortex> {out}")

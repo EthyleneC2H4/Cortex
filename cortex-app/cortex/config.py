@@ -129,6 +129,35 @@ class CortexConfig:
             self.qdrant_local_path = _abs(self.qdrant_local_path, self.project_root)
         else:
             self.qdrant_local_path = self.data_dir / "qdrant_local"
+        self._validate()
+
+    def _validate(self) -> None:
+        """启动期快速失败：错误配置宁可当场报错，也不在检索/记忆深处产生怪行为。"""
+        weights = (self.memory_w_similarity, self.memory_w_importance, self.memory_w_recency)
+        w_sum = sum(weights)
+        if abs(w_sum - 1.0) > 1e-6 or any(w < 0 for w in weights):
+            raise CortexConfigError(
+                f"记忆权重须非负且和为 1.0（当前 similarity={weights[0]} "
+                f"importance={weights[1]} recency={weights[2]}，和={w_sum:.4f}）："
+                "检查 CORTEX_MEMORY_W_SIMILARITY / _W_IMPORTANCE / _W_RECENCY")
+        if not 0 <= self.chunk_overlap < self.chunk_size:
+            raise CortexConfigError(
+                f"chunk_overlap({self.chunk_overlap}) 必须满足 0 ≤ overlap < "
+                f"chunk_size({self.chunk_size})：检查 CORTEX_CHUNK_SIZE / CORTEX_CHUNK_OVERLAP")
+        timeouts = {
+            "CORTEX_STAGE_TIMEOUT": self.stage_timeout,
+            "CORTEX_STAGE_TIMEOUT_GATHER": self.stage_timeout_gather,
+            "CORTEX_STAGE_TIMEOUT_RESEARCH": self.stage_timeout_research,
+            "CORTEX_STAGE_TIMEOUT_WRITE": self.stage_timeout_write,
+            "CORTEX_STAGE_TIMEOUT_CRITIQUE": self.stage_timeout_critique,
+            "CORTEX_STAGE_TIMEOUT_REVISE": self.stage_timeout_revise,
+            "LLM_TIMEOUT": self.llm_timeout,
+            "STRONG_TIMEOUT": self.strong_timeout,
+            "WEAK_TIMEOUT": self.weak_timeout,
+        }
+        for env_name, value in timeouts.items():
+            if value < 0:
+                raise CortexConfigError(f"{env_name} 不可为负（当前 {value}）")
 
     def rebase(self, project_root: str | Path) -> None:
         """把 data_dir/qdrant 等派生路径整体迁移到新 project_root 下（测试用）。"""
