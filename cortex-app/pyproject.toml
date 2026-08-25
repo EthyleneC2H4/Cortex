@@ -35,7 +35,7 @@ dependencies = [
   "rank-bm25>=0.2.2",
   "fastapi>=0.110",
   "python-multipart>=0.0.9",
-  "sse-starlette>=1.8",
+  "sse-starlette>=3.4.8",
   "uvicorn>=0.29",
 ]
 
