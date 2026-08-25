@@ -36,7 +36,13 @@ def value_eq(a: Any, b: Any) -> bool:
 
 
 def args_eq(expected: dict, actual: dict) -> bool:
-    """参数集等价：键集合必须完全一致（多余实参=不等），顺序无关，值递归 value_eq。"""
+    """参数集等价：键集合必须完全一致（多余实参=不等），顺序无关，值递归 value_eq。
+
+    任一侧为 None（_extract_tool_calls 的「参数解析失败」哨兵）时恒不等——
+    解析失败绝不与空参金标假匹配。
+    """
+    if expected is None or actual is None:
+        return False
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         return False
     if set(expected.keys()) != set(actual.keys()):

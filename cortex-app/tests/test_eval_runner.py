@@ -142,7 +142,8 @@ def test_run_bfcl_raw_openai_response_shape(tmp_path):
     assert res2["accuracy"] == 1.0
 
 
-def test_extract_tool_calls_tolerates_bad_arguments_json():
+def test_extract_tool_calls_marks_bad_arguments_as_unmatchable():
+    """参数 JSON 解析失败 → None 哨兵（非静默 {}）；合法调用不受影响。"""
     from cortex.eval.runner import _extract_tool_calls
 
     resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[
@@ -150,7 +151,26 @@ def test_extract_tool_calls_tolerates_bad_arguments_json():
         SimpleNamespace(function=SimpleNamespace(name="t2", arguments='{"ok": 1}')),
     ]))])
     calls = _extract_tool_calls(resp)
-    assert calls == [("t1", {}), ("t2", {"ok": 1})]
+    assert calls == [("t1", None), ("t2", {"ok": 1})]
+
+
+class _BrokenArgsLLM:
+    """arguments 为非法 JSON 字符串（模拟免费档生成截断）。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def invoke_with_tools(self, messages, tools, tool_choice="auto", **kwargs):
+        return _ToolResp([SimpleNamespace(name=self.name,
+                                          arguments='{"query": "x"')])  # 缺右括号
+
+
+def test_run_bfcl_unparsable_args_never_match_empty_gold(tmp_path):
+    """回归：损坏的参数绝不能静默变 {} 与「无参金标」假匹配（修复前 accuracy=1.0）。"""
+    rows = [{"name": "no_arg_tool", "args": {}, "instruction": "x"}]
+    res = run_bfcl(rows, _BrokenArgsLLM("no_arg_tool"), Checkpoint(tmp_path / "c.json"))
+    assert res["accuracy"] == 0.0
+    assert res["detail"]["bfcl/0"]["actual"] == [("no_arg_tool", None)]
 
 
 def test_extract_tool_calls_empty_and_none():

@@ -126,6 +126,12 @@ class TestAstMatch:
     def test_matrix(self, ename, eargs, aname, aargs, expected):
         assert ast_match(ename, eargs, aname, aargs) is expected
 
+    def test_unparsable_args_sentinel_never_matches(self):
+        """args=None（解析失败哨兵）与任何金标——含空参金标——都不得匹配。"""
+        assert ast_match("f", {}, "f", None) is False
+        assert ast_match("f", None, "f", {}) is False
+        assert multi_call_match([("f", {})], [("f", None)]) is False
+
 
 class TestMultiCallMatch:
     def test_two_calls_out_of_order_all_hit(self):

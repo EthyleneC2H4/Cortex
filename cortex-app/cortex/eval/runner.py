@@ -92,6 +92,9 @@ def _extract_tool_calls(resp) -> list:
     兼容两种形态：框架适配器返回的**原生 OpenAI 响应**
     （choices[0].message.tool_calls，function.name/arguments）与
     已扁平化的对象（resp.tool_calls，c.name/c.arguments）。
+
+    参数 JSON 解析失败或非 object 时置 **None 哨兵**（而非静默变 {}）：
+    None 在匹配器中恒不等，防止损坏的参数与「无参金标」假匹配。
     """
     calls = getattr(resp, "tool_calls", None)
     if calls is None:
@@ -106,9 +109,9 @@ def _extract_tool_calls(resp) -> list:
         try:
             args = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
         except (json.JSONDecodeError, TypeError):
-            args = {}
-        if not isinstance(args, dict):
-            args = {}
+            args = None  # 解析失败 ≠ 空参数：哨兵使其不可匹配
+        if args is not None and not isinstance(args, dict):
+            args = None  # 裸字符串/数组/标量等非 object JSON 同样不可信
         out.append((name, args))
     return out
 
