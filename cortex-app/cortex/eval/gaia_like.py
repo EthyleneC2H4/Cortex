@@ -23,8 +23,9 @@ _TRAILING_PUNCT = ".,!?;:。！？；"
 
 
 def normalize(answer: str) -> str:
-    """规范化答案：strip→lower→去冠词→去货币符号与%→千位逗号合并→空白折叠→去尾部标点。"""
+    """规范化答案：strip→lower→全角逗号折半角→去冠词→去货币符号与%→千位逗号合并→空白折叠→去尾部标点。"""
     s = str(answer).strip().lower()
+    s = s.replace("，", ", ")  # 中文数据集的全角列表分隔符按半角处理
     s = _ARTICLE_RE.sub("", s)
     s = _CURRENCY_RE.sub("", s)
     s = _THOUSANDS_RE.sub("", s)
@@ -33,13 +34,17 @@ def normalize(answer: str) -> str:
 
 
 def quasi_exact_match(pred: str, gold: str) -> bool:
-    """准精确匹配：规范化后相等；两者都含逗号分隔列表时按排序 token 集比较。"""
+    """准精确匹配：规范化后相等；两者都含逗号分隔列表时按排序 token 集比较。
+
+    列表切分用 ``re.split(r"\\s*,\\s*")``：逗号前后空白不参与 token，
+    "a , b" 与 "a,b" 同形。
+    """
     norm_pred, norm_gold = normalize(pred), normalize(gold)
     if norm_pred == norm_gold:
         return True
     if "," in norm_pred and "," in norm_gold:
-        pred_toks = sorted(t.strip() for t in norm_pred.split(",") if t.strip())
-        gold_toks = sorted(t.strip() for t in norm_gold.split(",") if t.strip())
+        pred_toks = sorted(t for t in re.split(r"\s*,\s*", norm_pred) if t)
+        gold_toks = sorted(t for t in re.split(r"\s*,\s*", norm_gold) if t)
         return pred_toks == gold_toks
     return False
 

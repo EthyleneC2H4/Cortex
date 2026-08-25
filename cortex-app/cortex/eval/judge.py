@@ -144,12 +144,14 @@ def _verdict_of(resp) -> Optional[str]:
     return None
 
 
-def pairwise_winrate(question: str, answer_a: str, answer_b: str,
-                     judge_llm, swap: bool = True) -> str:
-    """成对对比：返回 "a" | "b" | "tie"。
+def pairwise_judgement(question: str, answer_a: str, answer_b: str,
+                       judge_llm, swap: bool = True) -> tuple[str, Optional[bool]]:
+    """成对对比 → (verdict, 交换一致性)。
 
-    swap=True 时先 A 前后 B 前（展示顺序交换、标签不变）各判一次；
-    两次胜者一致→该胜者；不一致或任一次无效→tie。swap=False 仅判一次。
+    verdict ∈ "a"|"b"|"tie"：swap=True 时先 A 前后 B 前（展示顺序交换、标签不变）
+    各判一次，两次胜者一致→该胜者，不一致或任一次无效→tie。
+    交换一致性：两次有效判定是否相同（位置偏置的直接测量）——
+    True=稳定、False=顺序敏感（被记为 tie 的真实原因）、None=未做交换或存在无效判定。
     """
     def _ask(b_first: bool) -> Optional[str]:
         try:
@@ -162,11 +164,18 @@ def pairwise_winrate(question: str, answer_a: str, answer_b: str,
 
     first = _ask(False)
     if not swap:
-        return first or "tie"
+        return (first or "tie"), None
     second = _ask(True)
-    if first is None or second is None or first != second:
-        return "tie"
-    return first
+    if first is None or second is None:
+        return "tie", None
+    agreed = first == second
+    return (first if agreed else "tie"), agreed
+
+
+def pairwise_winrate(question: str, answer_a: str, answer_b: str,
+                     judge_llm, swap: bool = True) -> str:
+    """成对对比：返回 "a" | "b" | "tie"（pairwise_judgement 的仅判定向包装）。"""
+    return pairwise_judgement(question, answer_a, answer_b, judge_llm, swap=swap)[0]
 
 
 def cohen_kappa(votes_a: Sequence[str], votes_b: Sequence[str]) -> float:

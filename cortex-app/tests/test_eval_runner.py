@@ -194,6 +194,40 @@ def test_checkpoint_persists_and_resumes(tmp_path):
     assert res["accuracy"] == 1.0
 
 
+def test_checkpoint_mark_atomic_and_corruption_recovery(tmp_path):
+    """mark 走「临时文件 + 原子改名」：不留 .tmp 残留；半截 JSON 启动时静默归零。"""
+    path = tmp_path / "c.json"
+    ck = Checkpoint(path)
+    ck.mark("bfcl/0", {"correct": True})
+    assert not path.with_name(path.name + ".tmp").exists()
+    assert json.loads(path.read_text(encoding="utf-8")) == {"bfcl/0": {"correct": True}}
+
+    path.write_text('{"bfcl/0": {"correct"', encoding="utf-8")  # 中断残留的半截 JSON
+    recovered = Checkpoint(path)
+    assert recovered.done == {}
+    assert not recovered.is_done("bfcl/0")
+
+
+# ------------------------------------------------------------- bootstrap CI #
+def test_bootstrap_ci_bounds_and_reproducibility():
+    from cortex.eval.runner import _bootstrap_ci
+
+    assert _bootstrap_ci([]) == (0.0, 0.0)          # 空输入不崩溃
+    assert _bootstrap_ci([True] * 10) == (1.0, 1.0)  # 全对：区间退化为点
+    lo, hi = _bootstrap_ci([True] * 7 + [False] * 3)
+    assert lo <= 0.7 <= hi and lo < hi               # 区间包住点估计且非退化
+    # 固定种子 → 同输入两次完全一致（报告可复现）
+    assert _bootstrap_ci([True] * 7 + [False] * 3) == (lo, hi)
+
+
+def test_run_bfcl_reports_ci95(tmp_path):
+    rows = [{"name": "get_weather", "args": {"city": "北京"}, "instruction": "查天气"}]
+    res = run_bfcl(rows, _FakeToolLLM("get_weather", {"city": "北京"}),
+                   Checkpoint(tmp_path / "c.json"))
+    assert res["accuracy"] == 1.0
+    assert res["accuracy_ci95"] == str((1.0, 1.0))
+
+
 # ---------------------------------------------------------------- gaia ---- #
 def test_run_gaia_quasi_exact_match(tmp_path):
     rows = [{"id": "g1", "question": "1+1等于几？", "answer": "2", "level": "L1"}]
@@ -230,6 +264,53 @@ def test_run_judge_agreement_and_kappa(tmp_path):
     assert -1.0 <= res["kappa_vs_gold"] <= 1.0
 
 
+class _PositionBiasedLLM:
+    """恒判「先展示者」更胜——模拟裁判位置偏置（交换展示顺序后两次判定必然相悖）。
+
+    用 rindex 取**最后一次**出现：prompt 的说明行里也固定写着「【回答 A】与
+    【回答 B】」，index 会命中说明行而非答案块，交换就永远探测不到了。
+    """
+
+    def invoke(self, messages):
+        prompt = messages[0]["content"]
+        a_first = prompt.rindex("【回答 A】") < prompt.rindex("【回答 B】")
+        return _Resp("A" if a_first else "B")
+
+
+def test_run_judge_position_bias_yields_tie_and_zero_swap_agreement(tmp_path):
+    """顺序敏感的裁判：两次判定相悖 → 记 tie（并非难分伯仲）；交换一致率 0.0 量化偏置。"""
+    rows = [{"id": "j1", "question": "q", "answer_a": "甲答", "answer_b": "乙答",
+             "better": "a"}]
+    res = run_judge(rows, _PositionBiasedLLM(), Checkpoint(tmp_path / "c.json"))
+    assert res["detail"][0]["judge"] == "tie"
+    assert res["detail"][0]["swap_agree"] is False
+    assert res["swap_agreement_rate"] == 0.0
+    assert res["agreement_with_gold"] == 0.0
+
+
+def test_run_judge_stable_judge_full_swap_agreement(tmp_path):
+    # 位置无关的裁判：交换前后同判 → 一致率 1.0，verdict 取一致胜者
+    rows = [{"id": "j1", "question": "q", "answer_a": "甲答", "answer_b": "乙答",
+             "better": "a"}]
+    res = run_judge(rows, _FakeTextLLM("我认为回答 A 更好"), Checkpoint(tmp_path / "c.json"))
+    assert res["detail"][0]["judge"] == "a"
+    assert res["detail"][0]["swap_agree"] is True
+    assert res["swap_agreement_rate"] == 1.0
+
+
+def test_run_judge_old_checkpoint_without_swap_field(tmp_path):
+    """旧版 checkpoint 只存 verdict：读回时 swap_agree=None，不参与一致率、不崩溃。"""
+    path = tmp_path / "c.json"
+    ck = Checkpoint(path)
+    ck.mark("judge/0", {"verdict": "a"})  # 旧格式：无 swap_agree 键
+    rows = [{"id": "j1", "question": "q", "answer_a": "甲答", "answer_b": "乙答",
+             "better": "a"}]
+    res = run_judge(rows, _PositionBiasedLLM(), ck)  # LLM 不应被调用（断点命中）
+    assert res["agreement_with_gold"] == 1.0
+    assert res["swap_agreement_rate"] is None
+    assert res["detail"][0]["swap_agree"] is None
+
+
 # ---------------------------------------------------------------- 编排 ---- #
 def test_run_eval_writes_report_and_checkpoint(tmp_path, monkeypatch):
     def _gaia(rows, llm, ckpt):  # 模拟真实套件：逐条 mark 断点
@@ -259,3 +340,15 @@ def test_render_report_lists_ablation_flags():
     text = runner_mod._render_report(
         RunOptions(no_rerank=True, no_memory=True), [("X", {"accuracy": 0.9})])
     assert "no_rerank=True" in text and "no_memory=True" in text
+    assert "纯 LLM 评测" in text  # 消融时的诚实范围说明
+
+
+def test_run_eval_applies_no_rerank_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner_mod, "run_bfcl",
+                        lambda rows, llm, ckpt: {"n": 1, "accuracy": 1.0})
+    cfg = SimpleNamespace(data_dir=tmp_path, enable_rerank=True)
+    out = runner_mod.run_eval(cfg, strong_llm=object(), weak_llm=object(),
+                              options=RunOptions(suites=["bfcl"], no_rerank=True),
+                              progress=lambda _msg: None)
+    assert cfg.enable_rerank is False  # 唯一有运行时开关的消融旗标确实覆写配置
+    assert "纯 LLM 评测" in out.read_text(encoding="utf-8")

@@ -4,14 +4,20 @@
     python -m cortex.eval.run --suite all
     python -m cortex.eval.run --suite gaia --no-memory
 
-消融开关在构建应用前改配置/服务组合；报告落 ``data/eval/<ts>/report.md``。
-按条目 checkpoint（data/eval/<ts>/checkpoint.json）应对免费档限流中断。
+消融开关：no_rerank 会覆写 cfg.enable_rerank（唯一的运行时开关）；no_memory /
+single_agent 尚无对应全局配置（记忆服务恒装配、编排模式由请求级 --mode 决定），
+仅如实记录在报告头。且现有三套件均为纯 LLM 评测，不消费检索/记忆/多代理路径
+——待套件接入相应链路后覆写才真正影响指标。报告落 ``data/eval/<ts>/report.md``。
+按条目 checkpoint（data/eval/<ts>/checkpoint.json）应对免费档限流中断；
+checkpoint 写入为「临时文件 + 原子改名」，中断不会留下半截 JSON。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +66,11 @@ class Checkpoint:
 
     def mark(self, key: str, value) -> None:
         self.done[key] = value
-        self.path.write_text(json.dumps(self.done, ensure_ascii=False), encoding="utf-8")
+        # 原子写：临时文件 + 同目录 rename。限流中断若发生在 write_text 中途，
+        # 整个 checkpoint 会因半截 JSON 作废、全部进度归零；rename 不可分割。
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self.done, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
 
 
 # --------------------------------------------------------------------- #
@@ -116,6 +126,26 @@ def _extract_tool_calls(resp) -> list:
     return out
 
 
+def _bootstrap_ci(correct: list, *, iterations: int = 1000,
+                  seed: int = 42) -> tuple[float, float]:
+    """比例型指标的自展 95% 分位置信区间。固定种子保证报告可复现。
+
+    小样本（30 条）下点估计不稳，CI 让"0.90 与 0.87 的差异是否显著"有据可依。
+    """
+    if not correct:
+        return (0.0, 0.0)
+    vals = [1.0 if c else 0.0 for c in correct]
+    n = len(vals)
+    rng = random.Random(seed)
+    means = sorted(
+        sum(vals[rng.randrange(n)] for _ in range(n)) / n
+        for _ in range(iterations)
+    )
+    lo = means[max(0, int(0.025 * iterations))]
+    hi = means[min(iterations - 1, int(0.975 * iterations))]
+    return (round(lo, 4), round(hi, 4))
+
+
 def run_bfcl(rows, llm, ckpt: Checkpoint) -> dict:
     from .bfcl_like import ast_match, multi_call_match
 
@@ -152,8 +182,13 @@ def run_bfcl(rows, llm, ckpt: Checkpoint) -> dict:
             results[key] = {"correct": False, "error": str(exc)}
         ckpt.mark(key, results[key])
     n = len(results) or 1
-    correct = sum(1 for r in results.values() if r.get("correct"))
-    return {"n": len(results), "accuracy": round(correct / n, 4), "detail": results}
+    flags = [bool(r.get("correct")) for r in results.values()]
+    return {
+        "n": len(results),
+        "accuracy": round(sum(flags) / n, 4),
+        "accuracy_ci95": str(_bootstrap_ci(flags)),
+        "detail": results,
+    }
 
 
 def run_gaia(rows, strong_llm, ckpt: Checkpoint) -> dict:
@@ -182,33 +217,43 @@ def run_gaia(rows, strong_llm, ckpt: Checkpoint) -> dict:
         detail.append({"id": row.get("id", key), "level": row.get("level", "L1"),
                        "correct": correct, "pred": answer[:120], "gold": row["answer"]})
     levels = level_metrics([{"level": d["level"], "correct": d["correct"]} for d in detail])
+    flags = [bool(d["correct"]) for d in detail]
     overall_n = len(detail) or 1
-    overall_c = sum(1 for d in detail if d["correct"])
-    return {"n": len(detail), "quasi_exact_match": round(overall_c / overall_n, 4),
+    return {"n": len(detail),
+            "quasi_exact_match": round(sum(flags) / overall_n, 4),
+            "quasi_exact_match_ci95": str(_bootstrap_ci(flags)),
             "levels": levels, "detail": detail}
 
 
 def run_judge(rows, judge_llm, ckpt: Checkpoint) -> dict:
-    from .judge import cohen_kappa, pairwise_winrate
+    from .judge import cohen_kappa, pairwise_judgement
 
-    detail, agree = [], []
+    detail, agree, swap_flags = [], [], []
     for i, row in enumerate(rows):
         key = f"judge/{i}"
         if ckpt.is_done(key):
-            verdict = ckpt.done[key]["verdict"]
+            saved = ckpt.done[key]
+            verdict, swap_agree = saved.get("verdict", "tie"), saved.get("swap_agree")
         else:
-            verdict = pairwise_winrate(
+            verdict, swap_agree = pairwise_judgement(
                 row["question"], row["answer_a"], row["answer_b"], judge_llm)
-            ckpt.mark(key, {"verdict": verdict})
+            ckpt.mark(key, {"verdict": verdict, "swap_agree": swap_agree})
         gold = row.get("better", "tie")
         agree.append(verdict == gold)
-        detail.append({"id": row.get("id", key), "judge": verdict, "gold": gold})
+        if swap_agree is not None:
+            swap_flags.append(swap_agree)
+        detail.append({"id": row.get("id", key), "judge": verdict, "gold": gold,
+                       "swap_agree": swap_agree})
     gold_votes = [d["gold"] for d in detail]
     judge_votes = [d["judge"] for d in detail]
     n = len(detail) or 1
     return {
         "n": len(detail),
         "agreement_with_gold": round(sum(agree) / n, 4),
+        # 交换一致率：位置交换双评中两次判定一致的占比——低值即裁判位置偏置的
+        # 直接量化（这些条目被记为 tie 是偏置所致而非真的难分伯仲）
+        "swap_agreement_rate": (round(sum(swap_flags) / len(swap_flags), 4)
+                                if swap_flags else None),
         "win_rate_a": round(sum(1 for v in judge_votes if v == "a") / n, 4),
         "kappa_vs_gold": round(cohen_kappa(judge_votes, gold_votes), 4),
         "detail": detail,
@@ -231,6 +276,11 @@ def run_eval(cfg, *, strong_llm=None, weak_llm=None, options: Optional[RunOption
 
         mid = resolve_model_id(cfg)
         strong_llm, weak_llm = build_llms(cfg, model_id=mid)
+
+    # 消融覆写：仅 enable_rerank 存在运行时开关；其余两旗标无全局配置可覆写，
+    # 只随报告头记录（见模块 docstring 的诚实说明）
+    if options.no_rerank:
+        cfg.enable_rerank = False
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_dir = cfg.data_dir / "eval" / ts
@@ -265,14 +315,18 @@ def run_eval(cfg, *, strong_llm=None, weak_llm=None, options: Optional[RunOption
 
 
 def _render_report(options: RunOptions, sections) -> str:
+    ablated = options.no_rerank or options.no_memory or options.single_agent
     lines = [
         "# Cortex 评测报告",
         "",
         f"- 时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 消融设置：no_rerank={options.no_rerank} no_memory={options.no_memory} "
         f"single_agent={options.single_agent}",
-        "",
     ]
+    if ablated:
+        lines.append("- 说明：三套件为纯 LLM 评测，暂不消费检索/记忆/多代理路径；"
+                     "no_rerank 已覆写配置，其余开关仅记录在案")
+    lines.append("")
     for title, res in sections:
         lines.append(f"## {title}")
         lines.append("")
