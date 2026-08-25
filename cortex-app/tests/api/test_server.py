@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+
+from cortex.api.schemas import SessionInfo
 
 pytestmark = pytest.mark.unit
 
@@ -380,3 +383,169 @@ def test_api_key_enforced_when_configured():
         ok = c.post("/ingest-text", json={"title": "t", "content": "c"},
                     headers={"X-API-Key": "secret"})
         assert ok.status_code == 200
+
+
+# ---------------------------------------------- 新增：并发契约 / 加固 ---- #
+class _BlockingPipeline(_StubPipeline):
+    """可阻塞的桩 pipeline：进入 run 即发信号，等测试放行后才完成。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def run(self, topic: str) -> _StubResult:
+        self.entered.set()
+        assert self.release.wait(timeout=10), "测试管道未被放行（超时防挂死）"
+        return super().run(topic)
+
+
+class _BlockingApp(_StubApp):
+    def __init__(self, **cfg_extra) -> None:
+        super().__init__(**cfg_extra)
+        self.pipeline = _BlockingPipeline()
+
+    def build_pipeline(self, progress_cb=None) -> _BlockingPipeline:
+        pipe = self.pipeline
+        pipe.progress_cb = progress_cb
+        return pipe
+
+
+def test_research_second_submit_while_running_gets_409():
+    """并发回归：首个任务执行中（flag 已置位）第二个提交必须 409，而非双双入队。
+
+    旧实现 handler 只检查、worker 线程才置位，检查与置位之间存在并发窗口。
+    """
+    from cortex.api.server import _research_running, create_app
+
+    _research_running.clear()
+    stub = _BlockingApp(data_dir=None)
+    try:
+        with TestClient(create_app(cortex_app=stub)) as c:
+
+            def run_first():
+                with c.stream("POST", "/research", json={"topic": "第一"}) as resp:
+                    "".join(resp.iter_text())
+
+            t = threading.Thread(target=run_first, daemon=True)
+            t.start()
+            assert stub.pipeline.entered.wait(timeout=5), "第一个研究未进入执行"
+            # 另起独立客户端提交第二个任务：flag 是模块级共享状态，任何实例都该被 409 拒绝
+            with TestClient(create_app(cortex_app=_StubApp())) as c2:
+                second = c2.post("/research", json={"topic": "第二"})
+            assert second.status_code == 409
+            assert second.json()["detail"] == "已有研究任务在执行中，请等待完成后再提交"
+    finally:
+        stub.pipeline.release.set()
+    t.join(timeout=15)
+    assert not _research_running.is_set()  # 完成后清位，后续提交不再误拒
+
+
+class _ExplodingKB(_StubKB):
+    def ingest_document(self, path, weak_llm=None):
+        raise RuntimeError("parse failed at /Users/someone/secret/report.pdf")
+
+
+def test_ingest_failure_sanitizes_error_detail():
+    """422 只回人类可读短语，原始异常串（可能含本地路径）不外泄。"""
+    from cortex.api.server import create_app
+
+    stub = _StubApp()
+    stub.services["knowledge"] = _ExplodingKB()
+    with TestClient(create_app(cortex_app=stub)) as c:
+        resp = c.post("/ingest", files={"file": ("a.txt", b"data")})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "摄取失败" in detail
+    assert "secret" not in detail and "/" not in detail.split("摄取失败")[-1]
+
+
+def test_ingest_rejects_oversized_upload(client, monkeypatch):
+    monkeypatch.setenv("CORTEX_MAX_UPLOAD_MB", "1")
+    big = b"x" * (1024 * 1024 + 1)
+    resp = client.post("/ingest", files={"file": ("big.bin", big)})
+    assert resp.status_code == 413
+    assert "CORTEX_MAX_UPLOAD_MB" in resp.json()["detail"]
+    # 上限内正常通过
+    ok = client.post("/ingest", files={"file": ("ok.txt", b"hello")})
+    assert ok.status_code == 200
+    assert ok.json()["doc_id"] == "d1"
+
+
+def test_reports_list_and_fetch_roundtrip(tmp_path):
+    from cortex.api.server import create_app
+
+    stub = _StubApp(data_dir=tmp_path)
+    with TestClient(create_app(cortex_app=stub)) as c:
+        # 目录尚不存在 → 空列表而非 500
+        empty = c.get("/reports").json()
+        assert empty == {"reports": [], "total": 0}
+
+        with c.stream("POST", "/research", json={"topic": "取回检查"}) as resp:
+            "".join(resp.iter_text())
+
+        lst = c.get("/reports").json()
+        assert lst["total"] == 1
+        item = lst["reports"][0]
+        assert item["filename"].endswith(".md")
+        assert isinstance(item["size_bytes"], int) and item["modified_at"]
+
+        raw = c.get(f"/reports/{item['filename']}")
+        assert raw.status_code == 200
+        assert "桩研报" in raw.text
+
+        # 不存在的文件 → 404
+        assert c.get("/reports/no-such.md").status_code == 404
+        # 编码斜杠穿越：单段参数路由不匹配 → 有 dist 时落 SPA 兜底（index.html）、
+        # 无 dist 时 404——两条路都绝不返回 markdown 报告内容
+        trav = c.get("/reports/..%2F..%2Fsecret.md")
+        assert "text/markdown" not in trav.headers.get("content-type", "")
+        assert "桩研报" not in trav.text
+
+
+def _session_info(sid: str) -> SessionInfo:
+    return SessionInfo(session_id=sid, created_at="2026-01-01T00:00:00",
+                       turns=0, history=[])
+
+
+def test_session_store_ttl_expiry_and_sliding_renewal():
+    from cortex.api.server import _SessionStore
+
+    clock = {"now": 1000.0}
+    store = _SessionStore(max_size=10, ttl_seconds=100.0, time_fn=lambda: clock["now"])
+
+    store.put("s1", _session_info("s1"))
+    clock["now"] = 1099.0
+    assert store.get("s1") is not None          # 99s < TTL，仍存活
+    clock["now"] = 1190.0                        # 距上次访问已过 91s < 100s
+    assert store.get("s1") is not None          # 滑动续期生效（活跃会话不过期）
+    clock["now"] = 1400.0                        # 此后 210s 无访问 > TTL
+    assert store.get("s1") is None              # 过期淘汰
+
+
+def test_session_store_lru_eviction():
+    from cortex.api.server import _SessionStore
+
+    store = _SessionStore(max_size=2, ttl_seconds=3600.0)
+    store.put("a", _session_info("a"))
+    store.put("b", _session_info("b"))
+    store.get("a")                               # a 成为最近使用
+    store.put("c", _session_info("c"))           # 超容 → 最久未用的 b 被逐出
+    assert store.get("b") is None
+    assert store.get("a") is not None
+    assert store.get("c") is not None
+    assert store.evicted_recently("b")           # 墓碑：曾存在后被清理
+    assert not store.evicted_recently("zzz")     # 从未存在
+
+
+def test_session_gone_410_vs_404(monkeypatch):
+    """被逐出的会话返回 410（请开新对话），从未存在的 sid 返回 404。"""
+    from cortex.api.server import create_app
+
+    monkeypatch.setenv("CORTEX_SESSION_MAX", "1")
+    with TestClient(create_app(cortex_app=_StubApp())) as c:
+        a = c.post("/session", json={"history": []}).json()["session_id"]
+        b = c.post("/session", json={"history": []}).json()["session_id"]  # 挤掉 a
+        assert c.get(f"/session/{a}").status_code == 410
+        assert c.get(f"/session/{b}").status_code == 200
+        assert c.get("/session/never-seen").status_code == 404

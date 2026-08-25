@@ -5,10 +5,12 @@
   全部事件 data 为 JSON；done 附带落盘路径，断连后可从 data/reports/ 找回
 - POST /chat/stream：对话 SSE（session → message → done/error），复用
   /research 的 worker+queue 桥；整轮返回（框架同步 run 无 token 流）
-- POST /ingest / /ingest-text：文件与文本摄取入知识库
+- POST /ingest / /ingest-text：文件与文本摄取入知识库（大小上限 CORTEX_MAX_UPLOAD_MB，
+  默认 50MB）
 - GET /documents + DELETE /documents/{doc_id}：知识库文档列表与删除
-- POST /session + GET /session/{id}：会话历史存取（进程内 dict，v1 无 Redis，
-  重启即失——单用户个人助手定位下接受，前端有提示）
+- GET /reports + GET /reports/{filename}：研究报告列表与取回（断连后从 data/reports/ 找回）
+- POST /session + GET /session/{id}：会话历史存取（进程内 LRU+TTL 存储，v1 无 Redis；
+  容量 CORTEX_SESSION_MAX 默认 1000、TTL CORTEX_SESSION_TTL_HOURS 默认 24h，重启即失）
 - GET /health：服务健康 + 版本/运行时长/各服务在位状态/知识库统计
 - X-API-Key 鉴权（cfg.api_key 为空则开放）；CORTEX_CORS_ORIGINS 非空时启用 CORS；
   frontend/dist 存在时托管 SPA（生产单命令部署）
@@ -19,12 +21,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -82,6 +86,59 @@ def _save_report(cfg, topic: str, report_md: str) -> str:
         return ""
 
 
+class _SessionStore:
+    """进程内会话存储：LRU 容量上限 + TTL 过期（v1 无 Redis 的防无界增长折中）。
+
+    - get 命中即续期（滑动 TTL）：活跃会话不会因持续使用被过期清掉
+    - 超过容量上限时按最久未活跃淘汰
+    - 淘汰/过期留有界墓碑：GET /session 可区分「曾存在但已失效」(410) 与「从未存在」(404)
+    """
+
+    def __init__(self, max_size: int = 1000, ttl_seconds: float = 24 * 3600.0,
+                 time_fn=time.time) -> None:
+        self._data: OrderedDict[str, tuple[SessionInfo, float]] = OrderedDict()
+        self._evicted: OrderedDict[str, None] = OrderedDict()  # 有界墓碑，容量同 max
+        self._lock = threading.Lock()
+        self._max = max(1, int(max_size))
+        self._ttl = float(ttl_seconds)
+        self._time_fn = time_fn
+
+    def get(self, session_id: str) -> SessionInfo | None:
+        now = self._time_fn()
+        with self._lock:
+            entry = self._data.get(session_id)
+            if entry is None:
+                return None
+            info, ts = entry
+            if now - ts > self._ttl:
+                del self._data[session_id]
+                self._mark_evicted(session_id)
+                return None
+            self._data.move_to_end(session_id)
+            self._data[session_id] = (info, now)  # 滑动续期
+            return info
+
+    def put(self, session_id: str, info: SessionInfo) -> None:
+        now = self._time_fn()
+        with self._lock:
+            self._data[session_id] = (info, now)
+            self._data.move_to_end(session_id)
+            while len(self._data) > self._max:
+                stale, _ = self._data.popitem(last=False)
+                self._mark_evicted(stale)
+
+    def evicted_recently(self, session_id: str) -> bool:
+        """该会话是否曾被本进程持有后因 TTL/容量被清理（区别于从未存在）。"""
+        with self._lock:
+            return session_id in self._evicted
+
+    def _mark_evicted(self, session_id: str) -> None:
+        self._evicted[session_id] = None
+        self._evicted.move_to_end(session_id)
+        while len(self._evicted) > self._max:
+            self._evicted.popitem(last=False)
+
+
 def _mount_spa(fastapi_app: FastAPI, dist_dir: Path) -> bool:
     """dist 存在时挂载 SPA：/assets 静态目录 + 兜底路由回退 index.html。
 
@@ -111,7 +168,10 @@ def _mount_spa(fastapi_app: FastAPI, dist_dir: Path) -> bool:
 
 def create_app(cortex_app=None):
     """构建 FastAPI 应用；cortex_app 缺省时在 lifespan 中现场构建。"""
-    sessions: dict[str, SessionInfo] = {}
+    # 会话存储：LRU+TTL 防无界增长（env 可调；测试可注入更小阈值）
+    session_max = int(os.environ.get("CORTEX_SESSION_MAX", "1000") or "1000")
+    session_ttl_h = float(os.environ.get("CORTEX_SESSION_TTL_HOURS", "24") or "24")
+    sessions = _SessionStore(max_size=session_max, ttl_seconds=session_ttl_h * 3600.0)
     started_at = time.time()
 
     @asynccontextmanager
@@ -164,7 +224,8 @@ def create_app(cortex_app=None):
         if not expected:
             return
         got = request.headers.get("X-API-Key", "")
-        if got != expected:
+        # 常数时间比较，防时序侧信道逐字节探测密钥
+        if not hmac.compare_digest(got.encode("utf-8"), expected.encode("utf-8")):
             raise HTTPException(status_code=401, detail="无效 X-API-Key")
 
     # ---- POST /research（SSE） -------------------------------------- #
@@ -173,8 +234,12 @@ def create_app(cortex_app=None):
         app_ref = cortex_app
         if app_ref is None:
             raise HTTPException(status_code=503, detail="应用尚未初始化")
+        # 409 检查与置位必须在 handler 内同步完成（async handler 无 await 的同步段
+        # 相对其它请求是原子的），消除旧实现“handler 只查、worker 线程才置位”留下的
+        # 并发窗口（两个请求都能通过检查）；worker 只负责 finally 清位。
         if _research_running.is_set():
             raise HTTPException(status_code=409, detail="已有研究任务在执行中，请等待完成后再提交")
+        _research_running.set()
 
         events: queue.Queue = queue.Queue()
 
@@ -182,8 +247,7 @@ def create_app(cortex_app=None):
             events.put({"progress": payload})
 
         def worker() -> None:
-            _research_running.set()
-            _agent_gate.acquire()  # 研究全程持锁：与 chat 互斥（409 闸已挡 research-vs-research）
+            _agent_gate.acquire()  # 研究全程持锁：与 chat 互斥（409 闸已在 handler 置位）
             try:
                 if req.mode == "explore":
                     from ..agents.dispatch import ExplorationMode
@@ -239,7 +303,7 @@ def create_app(cortex_app=None):
             info = SessionInfo(session_id=sid,
                                created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                                turns=0, history=[])
-            sessions[sid] = info
+            sessions.put(sid, info)
 
         events: queue.Queue = queue.Queue()
 
@@ -329,12 +393,21 @@ def create_app(cortex_app=None):
             raise HTTPException(status_code=503, detail="知识库服务未初始化")
         upload_dir = Path("knowledge_base/uploads")
         upload_dir.mkdir(parents=True, exist_ok=True)
+        # 上传大小上限：先读入内存再校验（个人助手定位下文件量级小，可接受）
+        max_mb = int(os.environ.get("CORTEX_MAX_UPLOAD_MB", "50") or "50")
+        payload = await file.read()
+        if len(payload) > max_mb * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail=f"文件过大：超过 {max_mb}MB 上限（可用 CORTEX_MAX_UPLOAD_MB 调整）")
         dest = upload_dir / f"{uuid.uuid4().hex[:8]}-{file.filename}"
-        dest.write_bytes(await file.read())
+        dest.write_bytes(payload)
         try:
             info = kb.ingest_document(dest, weak_llm=cortex_app.weak_llm)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=422, detail=f"摄取失败: {exc}") from exc
+            # 422 不回显原始异常串：可能携带本地路径等敏感信息
+            raise HTTPException(
+                status_code=422, detail=f"摄取失败: {_humanize_error(exc)}") from exc
         return {"doc_id": info["doc_id"], "title": info["title"], "n_chunks": info["n_chunks"]}
 
     @app.post("/ingest-text")
@@ -375,19 +448,52 @@ def create_app(cortex_app=None):
             raise HTTPException(status_code=404, detail="文档不存在")
         return {"deleted": True, "doc_id": doc_id}
 
+    # ---- 研究报告取回 ------------------------------------------------ #
+    def _reports_dir() -> Path:
+        data_dir = getattr(cfg, "data_dir", "") if cfg else ""
+        return Path(data_dir) / "reports" if data_dir else Path("data/reports")
+
+    @app.get("/reports")
+    async def list_reports(_: None = Depends(require_key)):
+        reports_dir = _reports_dir()
+        if not reports_dir.exists():
+            return {"reports": [], "total": 0}
+        items = [
+            {
+                "filename": p.name,
+                "size_bytes": p.stat().st_size,
+                "modified_at": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                             time.localtime(p.stat().st_mtime)),
+            }
+            for p in sorted(reports_dir.glob("*.md"),
+                            key=lambda p: p.stat().st_mtime, reverse=True)
+        ]
+        return {"reports": items, "total": len(items)}
+
+    @app.get("/reports/{filename}")
+    async def get_report(filename: str, _: None = Depends(require_key)):
+        reports_dir = _reports_dir().resolve()
+        candidate = (reports_dir / filename).resolve()
+        # 防目录穿越：解析后必须仍位于 reports 目录内的真实文件
+        if not candidate.is_relative_to(reports_dir) or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="报告不存在")
+        return FileResponse(candidate, media_type="text/markdown", filename=candidate.name)
+
     # ---- 会话 ------------------------------------------------------- #
     @app.post("/session", response_model=SessionInfo)
     async def create_session(req: SessionCreateRequest, _: None = Depends(require_key)):
         sid = uuid.uuid4().hex[:12]
         info = SessionInfo(session_id=sid, created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                            turns=len(req.history), history=req.history)
-        sessions[sid] = info
+        sessions.put(sid, info)
         return info
 
     @app.get("/session/{session_id}", response_model=SessionInfo)
     async def get_session(session_id: str, _: None = Depends(require_key)):
         info = sessions.get(session_id)
         if info is None:
+            if sessions.evicted_recently(session_id):
+                raise HTTPException(status_code=410, detail="会话已过期或被清理，请开启新对话")
             raise HTTPException(status_code=404, detail="会话不存在")
         return info
 
