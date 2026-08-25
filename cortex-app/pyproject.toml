@@ -52,7 +52,7 @@ cortex-eval = "cortex.eval.runner:main"
 rerank = ["FlagEmbedding>=1.2"]
 docker = ["neo4j>=5.0"]
 mcp = ["mcp>=1.29,<2"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.16.4"]
 
 [tool.setuptools.packages.find]
 include = ["cortex*"]
